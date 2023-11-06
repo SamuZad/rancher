@@ -3,14 +3,16 @@ package managesystemagent
 import (
 	"encoding/base64"
 	"encoding/json"
+	v1 "github.com/rancher/rancher/pkg/apis/provisioning.cattle.io/v1"
 	"testing"
 	"time"
 
 	"github.com/golang/mock/gomock"
+	"github.com/rancher/fleet/pkg/apis/fleet.cattle.io/v1alpha1"
 	fleetv1alpha1 "github.com/rancher/fleet/pkg/apis/fleet.cattle.io/v1alpha1"
 	rkev1 "github.com/rancher/rancher/pkg/apis/rke.cattle.io/v1"
 	"github.com/rancher/rancher/pkg/capr"
-	"github.com/rancher/rancher/pkg/capr/mock/mockfleetcontrollers"
+	"github.com/rancher/wrangler/pkg/generic/fake"
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -87,9 +89,11 @@ func TestManageSystemAgent_syncSystemUpgradeControllerStatusConditionManipulatio
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctrl := gomock.NewController(t)
-			bc := mockfleetcontrollers.NewMockBundleController(ctrl)
+			bc := fake.NewMockControllerInterface[*v1alpha1.Bundle, *v1alpha1.BundleList](ctrl)
+			pc := fake.NewMockCacheInterface[*v1.Cluster](ctrl)
 			h := &handler{
-				bundles: bc,
+				bundles:      bc,
+				provClusters: pc,
 			}
 			a := assert.New(t)
 
@@ -113,6 +117,15 @@ func TestManageSystemAgent_syncSystemUpgradeControllerStatusConditionManipulatio
 			capr.SystemUpgradeControllerReady.LastUpdated(&mockControlPlane.Status, time.Time{}.UTC().Format(time.RFC3339))
 			lu := capr.SystemUpgradeControllerReady.GetLastUpdated(&mockControlPlane.Status)
 
+			pc.EXPECT().Get(tt.args.controlPlaneNamespace, tt.args.controlPlaneName).Return(&v1.Cluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      tt.args.controlPlaneName,
+					Namespace: tt.args.controlPlaneNamespace,
+				},
+				Status: v1.ClusterStatus{
+					FleetWorkspaceName: tt.args.controlPlaneNamespace,
+				},
+			}, nil)
 			expectedBundleName := capr.SafeConcatName(capr.MaxHelmReleaseNameLength, "mcc", capr.SafeConcatName(48, tt.args.controlPlaneName, "managed", "system-upgrade-controller"))
 			bc.EXPECT().Get(tt.args.controlPlaneNamespace, expectedBundleName, metav1.GetOptions{}).Return(&fleetv1alpha1.Bundle{
 				ObjectMeta: metav1.ObjectMeta{

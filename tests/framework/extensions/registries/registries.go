@@ -33,10 +33,11 @@ func CheckAllClusterPodsForRegistryPrefix(client *rancher.Client, clusterID, reg
 			return false, err
 		}
 		for _, container := range podSpec.Containers {
-			log.Infoln(container.Image)
 			if !strings.Contains(container.Image, registryPrefix) {
+				log.Warnf("pod/containerImage %s/%s is not using the correct registry prefix", pod.Name, container.Image)
 				return false, nil
 			}
+			log.Infoln(container.Image)
 		}
 	}
 	return true, nil
@@ -51,7 +52,7 @@ func CheckPodStatusImageSource(client *rancher.Client, clusterName, registryFQDN
 		return false, []error{err}
 	}
 
-	_, podErrors := pods.StatusPods(client, clusterID)
+	podErrors := pods.StatusPods(client, clusterID)
 	if len(podErrors) != 0 {
 		return false, []error{fmt.Errorf("error: pod(s) are in an error state  %v", podErrors)}
 	}

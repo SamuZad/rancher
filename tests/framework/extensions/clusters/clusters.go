@@ -12,13 +12,13 @@ import (
 	v3 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
 	apisV1 "github.com/rancher/rancher/pkg/apis/provisioning.cattle.io/v1"
 	rkev1 "github.com/rancher/rancher/pkg/apis/rke.cattle.io/v1"
-	kubeProvisioning "github.com/rancher/rancher/tests/framework/clients/provisioning"
 	"github.com/rancher/rancher/tests/framework/clients/rancher"
 	management "github.com/rancher/rancher/tests/framework/clients/rancher/generated/management/v3"
 	v1 "github.com/rancher/rancher/tests/framework/clients/rancher/v1"
 	"github.com/rancher/rancher/tests/framework/extensions/defaults"
+	"github.com/rancher/rancher/tests/framework/extensions/provisioninginput"
+	"github.com/rancher/rancher/tests/framework/extensions/workloads/pods"
 	"github.com/rancher/rancher/tests/framework/pkg/wait"
-	rancherProvisioning "github.com/rancher/rancher/tests/v2/validation/provisioning"
 	"github.com/rancher/wrangler/pkg/summary"
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
@@ -30,9 +30,39 @@ import (
 )
 
 const (
-	ProvisioningSteveResourceType = "provisioning.cattle.io.cluster"
-	FleetSteveResourceType        = "fleet.cattle.io.cluster"
+	ProvisioningSteveResourceType        = "provisioning.cattle.io.cluster"
+	FleetSteveResourceType               = "fleet.cattle.io.cluster"
+	PodSecurityAdmissionSteveResoureType = "management.cattle.io.podsecurityadmissionconfigurationtemplate"
+	baseline                             = "baseline"
+
+	etcdRole         = "etcd-role"
+	controlPlaneRole = "control-plane-role"
+	workerRole       = "worker-role"
+
+	externalCloudProviderString = "cloud-provider=external"
+	kubeletArgKey               = "kubelet-arg"
+	kubeletAPIServerArgKey      = "kubeapi-server-arg"
+	kubeControllerManagerArgKey = "kube-controller-manager-arg"
+	cloudProviderAnnotationName = "cloud-provider-name"
+	disableCloudController      = "disable-cloud-controller"
+	protectKernelDefaults       = "protect-kernel-defaults"
 )
+
+// GetV1ProvisioningClusterByName is a helper function that returns the cluster ID by name
+func GetV1ProvisioningClusterByName(client *rancher.Client, clusterName string) (string, error) {
+	clusterList, err := client.Steve.SteveType(ProvisioningSteveResourceType).List(nil)
+	if err != nil {
+		return "", err
+	}
+
+	for _, cluster := range clusterList.Data {
+		if cluster.Name == clusterName {
+			return cluster.ID, nil
+		}
+	}
+
+	return "", nil
+}
 
 // GetClusterIDByName is a helper function that returns the cluster ID by name
 func GetClusterIDByName(client *rancher.Client, clusterName string) (string, error) {
@@ -113,18 +143,75 @@ func CheckServiceAccountTokenSecret(client *rancher.Client, clusterName string) 
 		return false, err
 	}
 
-	if cluster.ServiceAccountTokenSecret != "" {
-		logrus.Infof("serviceAccountTokenSecret in this cluster is: %s", cluster.ServiceAccountTokenSecret)
-		return true, nil
-	} else {
+	if cluster.ServiceAccountTokenSecret == "" {
 		logrus.Warn("warning: serviceAccountTokenSecret does not exist in this cluster!")
 		return false, nil
 	}
+
+	logrus.Infof("serviceAccountTokenSecret in this cluster is: %s", cluster.ServiceAccountTokenSecret)
+	return true, nil
+}
+
+// CreateRancherBaselinePSACT creates custom PSACT called rancher-baseline which sets each PSS to baseline.
+func CreateRancherBaselinePSACT(client *rancher.Client, psact string) error {
+	_, err := client.Steve.SteveType(PodSecurityAdmissionSteveResoureType).ByID(psact)
+	if err == nil {
+		return err
+	}
+
+	template := &v3.PodSecurityAdmissionConfigurationTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: psact,
+		},
+		Description: "This is a custom baseline Pod Security Admission Configuration Template. " +
+			"It defines a minimally restrictive policy which prevents known privilege escalations. " +
+			"This policy contains namespace level exemptions for Rancher components.",
+		Configuration: v3.PodSecurityAdmissionConfigurationTemplateSpec{
+			Defaults: v3.PodSecurityAdmissionConfigurationTemplateDefaults{
+				Enforce: baseline,
+				Audit:   baseline,
+				Warn:    baseline,
+			},
+			Exemptions: v3.PodSecurityAdmissionConfigurationTemplateExemptions{
+				Usernames:      []string{},
+				RuntimeClasses: []string{},
+				Namespaces: []string{
+					"ingress-nginx",
+					"kube-system",
+					"cattle-system",
+					"cattle-epinio-system",
+					"cattle-fleet-system",
+					"longhorn-system",
+					"cattle-neuvector-system",
+					"cattle-monitoring-system",
+					"rancher-alerting-drivers",
+					"cis-operator-system",
+					"cattle-csp-adapter-system",
+					"cattle-externalip-system",
+					"cattle-gatekeeper-system",
+					"istio-system",
+					"cattle-istio-system",
+					"cattle-logging-system",
+					"cattle-windows-gmsa-system",
+					"cattle-sriov-system",
+					"cattle-ui-plugin-system",
+					"tigera-operator",
+				},
+			},
+		},
+	}
+
+	_, err = client.Steve.SteveType(PodSecurityAdmissionSteveResoureType).Create(template)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // NewRKE1lusterConfig is a constructor for a v3.Cluster object, to be used by the rancher.Client.Provisioning client.
-func NewRKE1ClusterConfig(clusterName, cni, kubernetesVersion string, psact string, client *rancher.Client, advancedOptions rancherProvisioning.AdvancedOptions) *management.Cluster {
-	clusterConfig := &management.Cluster{
+func NewRKE1ClusterConfig(clusterName string, client *rancher.Client, clustersConfig *ClusterConfig) *management.Cluster {
+	newConfig := &management.Cluster{
 		DockerRootDir:           "/var/lib/docker",
 		EnableClusterAlerting:   false,
 		EnableClusterMonitoring: false,
@@ -146,25 +233,44 @@ func NewRKE1ClusterConfig(clusterName, cni, kubernetesVersion string, psact stri
 				Provider: "metrics-server",
 			},
 			Network: &management.NetworkConfig{
-				Plugin:  cni,
+				Plugin:  clustersConfig.CNI,
 				MTU:     0,
 				Options: map[string]string{},
 			},
-			Version: kubernetesVersion,
+			Version: clustersConfig.KubernetesVersion,
 		},
 	}
-	clusterConfig.ClusterAgentDeploymentCustomization = &advancedOptions.ClusterAgentCustomization
-	clusterConfig.FleetAgentDeploymentCustomization = &advancedOptions.FleetAgentCustomization
+	newConfig.ClusterAgentDeploymentCustomization = clustersConfig.ClusterAgent
+	newConfig.FleetAgentDeploymentCustomization = clustersConfig.FleetAgent
 
-	if psact != "" {
-		clusterConfig.DefaultPodSecurityAdmissionConfigurationTemplateName = psact
+	if clustersConfig.Registries != nil {
+		if clustersConfig.Registries.RKE1Registries != nil {
+			newConfig.RancherKubernetesEngineConfig.PrivateRegistries = clustersConfig.Registries.RKE1Registries
+			for _, registry := range clustersConfig.Registries.RKE1Registries {
+				if registry.ECRCredentialPlugin != nil {
+					awsAccessKeyID := fmt.Sprintf("AWS_ACCESS_KEY_ID=%s", registry.ECRCredentialPlugin.AwsAccessKeyID)
+					awsSecretAccessKey := fmt.Sprintf("AWS_SECRET_ACCESS_KEY=%s", registry.ECRCredentialPlugin.AwsSecretAccessKey)
+					extraEnv := []string{awsAccessKeyID, awsSecretAccessKey}
+					newConfig.RancherKubernetesEngineConfig.Services = &management.RKEConfigServices{
+						Kubelet: &management.KubeletService{
+							ExtraEnv: extraEnv,
+						},
+					}
+					break
+				}
+			}
+		}
 	}
 
-	return clusterConfig
+	if clustersConfig.PSACT != "" {
+		newConfig.DefaultPodSecurityAdmissionConfigurationTemplateName = clustersConfig.PSACT
+	}
+
+	return newConfig
 }
 
 // NewK3SRKE2ClusterConfig is a constructor for a apisV1.Cluster object, to be used by the rancher.Client.Provisioning client.
-func NewK3SRKE2ClusterConfig(clusterName, namespace, cni, cloudCredentialSecretName, kubernetesVersion string, psact string, machinePools []apisV1.RKEMachinePool, advancedOptions rancherProvisioning.AdvancedOptions) *apisV1.Cluster {
+func NewK3SRKE2ClusterConfig(clusterName, namespace string, clustersConfig *ClusterConfig, machinePools []apisV1.RKEMachinePool, cloudCredentialSecretName string) *apisV1.Cluster {
 	typeMeta := metav1.TypeMeta{
 		Kind:       "Cluster",
 		APIVersion: "provisioning.cattle.io/v1",
@@ -180,24 +286,51 @@ func NewK3SRKE2ClusterConfig(clusterName, namespace, cni, cloudCredentialSecretN
 		SnapshotRetention:    5,
 		SnapshotScheduleCron: "0 */5 * * *",
 	}
+	if clustersConfig.Etcd != nil {
+		etcd = clustersConfig.Etcd
+	}
 
 	chartValuesMap := rkev1.GenericMap{
 		Data: map[string]interface{}{},
 	}
+	chartAdditionalManifest := ""
+	if clustersConfig.AddOnConfig != nil {
+		if clustersConfig.AddOnConfig.ChartValues != nil {
+			chartValuesMap = *clustersConfig.AddOnConfig.ChartValues
+		}
+		chartAdditionalManifest = clustersConfig.AddOnConfig.AdditionalManifest
+	}
 
 	machineGlobalConfigMap := rkev1.GenericMap{
 		Data: map[string]interface{}{
-			"cni":                 cni,
+			"cni":                 clustersConfig.CNI,
 			"disable-kube-proxy":  false,
 			"etcd-expose-metrics": false,
 			"profile":             nil,
 		},
+	}
+	machineSelectorConfigs := []rkev1.RKESystemConfig{}
+	if clustersConfig.Advanced != nil {
+		if clustersConfig.Advanced.MachineGlobalConfig != nil {
+			for k, v := range clustersConfig.Advanced.MachineGlobalConfig.Data {
+				machineGlobalConfigMap.Data[k] = v
+			}
+		}
+
+		if clustersConfig.Advanced.MachineSelectors != nil {
+			machineSelectorConfigs = *clustersConfig.Advanced.MachineSelectors
+		}
 	}
 
 	localClusterAuthEndpoint := rkev1.LocalClusterAuthEndpoint{
 		CACerts: "",
 		Enabled: false,
 		FQDN:    "",
+	}
+	if clustersConfig.Networking != nil {
+		if clustersConfig.Networking.LocalClusterAuthEndpoint != nil {
+			localClusterAuthEndpoint = *clustersConfig.Networking.LocalClusterAuthEndpoint
+		}
 	}
 
 	upgradeStrategy := rkev1.ClusterUpgradeStrategy{
@@ -206,14 +339,16 @@ func NewK3SRKE2ClusterConfig(clusterName, namespace, cni, cloudCredentialSecretN
 		WorkerConcurrency:        "10%",
 		WorkerDrainOptions:       rkev1.DrainOptions{},
 	}
-	clusterAgentDeploymentCustomization := &apisV1.AgentDeploymentCustomization{}
-	if advancedOptions.ClusterAgentCustomization.OverrideResourceRequirements != nil {
-		clusterAgentOverrides := ResourceConfigHelper(advancedOptions.ClusterAgentCustomization.OverrideResourceRequirements)
-		clusterAgentDeploymentCustomization.OverrideResourceRequirements = clusterAgentOverrides
+	if clustersConfig.UpgradeStrategy != nil {
+		upgradeStrategy = *clustersConfig.UpgradeStrategy
 	}
-	if advancedOptions.ClusterAgentCustomization.AppendTolerations != nil {
+
+	clusterAgentDeploymentCustomization := &apisV1.AgentDeploymentCustomization{}
+	if clustersConfig.ClusterAgent != nil {
+		clusterAgentOverrides := ResourceConfigHelper(clustersConfig.ClusterAgent.OverrideResourceRequirements)
+		clusterAgentDeploymentCustomization.OverrideResourceRequirements = clusterAgentOverrides
 		v1ClusterTolerations := []corev1.Toleration{}
-		for _, t := range advancedOptions.ClusterAgentCustomization.AppendTolerations {
+		for _, t := range clustersConfig.ClusterAgent.AppendTolerations {
 			v1ClusterTolerations = append(v1ClusterTolerations, corev1.Toleration{
 				Key:      t.Key,
 				Operator: corev1.TolerationOperator(t.Operator),
@@ -222,19 +357,15 @@ func NewK3SRKE2ClusterConfig(clusterName, namespace, cni, cloudCredentialSecretN
 			})
 		}
 		clusterAgentDeploymentCustomization.AppendTolerations = v1ClusterTolerations
-	}
-	if advancedOptions.ClusterAgentCustomization.OverrideAffinity != nil {
-		clusterAgentDeploymentCustomization.OverrideAffinity = AgentAffinityConfigHelper(advancedOptions.ClusterAgentCustomization.OverrideAffinity)
+		clusterAgentDeploymentCustomization.OverrideAffinity = AgentAffinityConfigHelper(clustersConfig.ClusterAgent.OverrideAffinity)
 	}
 
 	fleetAgentDeploymentCustomization := &apisV1.AgentDeploymentCustomization{}
-	if advancedOptions.FleetAgentCustomization.OverrideResourceRequirements != nil {
-		fleetAgentOverrides := ResourceConfigHelper(advancedOptions.FleetAgentCustomization.OverrideResourceRequirements)
+	if clustersConfig.FleetAgent != nil {
+		fleetAgentOverrides := ResourceConfigHelper(clustersConfig.FleetAgent.OverrideResourceRequirements)
 		fleetAgentDeploymentCustomization.OverrideResourceRequirements = fleetAgentOverrides
-	}
-	if advancedOptions.FleetAgentCustomization.AppendTolerations != nil {
 		v1FleetTolerations := []corev1.Toleration{}
-		for _, t := range advancedOptions.FleetAgentCustomization.AppendTolerations {
+		for _, t := range clustersConfig.FleetAgent.AppendTolerations {
 			v1FleetTolerations = append(v1FleetTolerations, corev1.Toleration{
 				Key:      t.Key,
 				Operator: corev1.TolerationOperator(t.Operator),
@@ -243,17 +374,25 @@ func NewK3SRKE2ClusterConfig(clusterName, namespace, cni, cloudCredentialSecretN
 			})
 		}
 		fleetAgentDeploymentCustomization.AppendTolerations = v1FleetTolerations
+		fleetAgentDeploymentCustomization.OverrideAffinity = AgentAffinityConfigHelper(clustersConfig.FleetAgent.OverrideAffinity)
 	}
-	if advancedOptions.FleetAgentCustomization.OverrideAffinity != nil {
-		fleetAgentDeploymentCustomization.OverrideAffinity = AgentAffinityConfigHelper(advancedOptions.FleetAgentCustomization.OverrideAffinity)
+	var registries *rkev1.Registry
+	if clustersConfig.Registries != nil {
+		registries = clustersConfig.Registries.RKE2Registries
+	}
+
+	if clustersConfig.CloudProvider == provisioninginput.AWSProviderName.String() {
+		machineSelectorConfigs = append(machineSelectorConfigs, awsOutOfTreeSystemConfig()...)
 	}
 
 	rkeSpecCommon := rkev1.RKEClusterSpecCommon{
+		UpgradeStrategy:       upgradeStrategy,
 		ChartValues:           chartValuesMap,
 		MachineGlobalConfig:   machineGlobalConfigMap,
+		MachineSelectorConfig: machineSelectorConfigs,
+		AdditionalManifest:    chartAdditionalManifest,
+		Registries:            registries,
 		ETCD:                  etcd,
-		UpgradeStrategy:       upgradeStrategy,
-		MachineSelectorConfig: []rkev1.RKESystemConfig{},
 	}
 	rkeConfig := &apisV1.RKEConfig{
 		RKEClusterSpecCommon: rkeSpecCommon,
@@ -262,15 +401,15 @@ func NewK3SRKE2ClusterConfig(clusterName, namespace, cni, cloudCredentialSecretN
 
 	spec := apisV1.ClusterSpec{
 		CloudCredentialSecretName:           cloudCredentialSecretName,
-		KubernetesVersion:                   kubernetesVersion,
+		KubernetesVersion:                   clustersConfig.KubernetesVersion,
 		LocalClusterAuthEndpoint:            localClusterAuthEndpoint,
 		RKEConfig:                           rkeConfig,
 		ClusterAgentDeploymentCustomization: clusterAgentDeploymentCustomization,
 		FleetAgentDeploymentCustomization:   fleetAgentDeploymentCustomization,
 	}
 
-	if psact != "" {
-		spec.DefaultPodSecurityAdmissionConfigurationTemplateName = psact
+	if clustersConfig.PSACT != "" {
+		spec.DefaultPodSecurityAdmissionConfigurationTemplateName = clustersConfig.PSACT
 	}
 
 	v1Cluster := &apisV1.Cluster{
@@ -280,6 +419,52 @@ func NewK3SRKE2ClusterConfig(clusterName, namespace, cni, cloudCredentialSecretN
 	}
 
 	return v1Cluster
+}
+
+// awsOutOfTreeSystemConfig constructs the proper rkeSystemConfig slice for enabling the aws cloud provider
+// out-of-tree services
+func awsOutOfTreeSystemConfig() (rkeConfig []rkev1.RKESystemConfig) {
+	roles := []string{etcdRole, controlPlaneRole, workerRole}
+
+	for _, role := range roles {
+		selector := &metav1.LabelSelector{
+			MatchLabels: map[string]string{
+				"rke.cattle.io/" + role: "true",
+			},
+		}
+		configData := map[string]interface{}{}
+
+		configData[kubeletArgKey] = []string{externalCloudProviderString}
+
+		if role == controlPlaneRole {
+			configData[kubeletAPIServerArgKey] = []string{externalCloudProviderString}
+			configData[kubeControllerManagerArgKey] = []string{externalCloudProviderString}
+		}
+
+		if role == workerRole || role == controlPlaneRole {
+			configData[disableCloudController] = true
+		}
+
+		rkeConfig = append(rkeConfig, RKESystemConfigTemplate(configData, selector))
+	}
+
+	configData := map[string]interface{}{
+		cloudProviderAnnotationName: provisioninginput.AWSProviderName,
+		protectKernelDefaults:       false,
+	}
+
+	rkeConfig = append(rkeConfig, RKESystemConfigTemplate(configData, nil))
+	return
+}
+
+// RKESYstemConfigTemplate constructs an RKESystemConfig object given config data and a selector
+func RKESystemConfigTemplate(config map[string]interface{}, selector *metav1.LabelSelector) rkev1.RKESystemConfig {
+	return rkev1.RKESystemConfig{
+		Config: rkev1.GenericMap{
+			Data: config,
+		},
+		MachineLabelSelector: selector,
+	}
 }
 
 // ResourceConfigHelper is a "helper" function that is used to convert the management.ResourceRequirements struct
@@ -574,11 +759,11 @@ func AgentAffinityConfigHelper(advancedClusterAffinity *management.Affinity) *co
 	return agentAffinity
 }
 
-// HardenK3SRKE2ClusterConfig is a constructor for a apisV1.Cluster object, to be used by the rancher.Client.Provisioning client.
-func HardenK3SRKE2ClusterConfig(clusterName, namespace, cni, cloudCredentialSecretName, kubernetesVersion string, psact string, machinePools []apisV1.RKEMachinePool, advancedOptions rancherProvisioning.AdvancedOptions) *apisV1.Cluster {
-	v1Cluster := NewK3SRKE2ClusterConfig(clusterName, namespace, cni, cloudCredentialSecretName, kubernetesVersion, psact, machinePools, advancedOptions)
+// HardenK3SClusterConfig is a constructor for a apisV1.Cluster object, to be used by the rancher.Client.Provisioning client.
+func HardenK3SClusterConfig(clusterName, namespace string, clustersConfig *ClusterConfig, machinePools []apisV1.RKEMachinePool, cloudCredentialSecretName string) *apisV1.Cluster {
+	v1Cluster := NewK3SRKE2ClusterConfig(clusterName, namespace, clustersConfig, machinePools, cloudCredentialSecretName)
 
-	if strings.Contains(kubernetesVersion, "k3s") {
+	if clustersConfig.KubernetesVersion <= string(provisioninginput.PSPKubeVersionLimit) {
 		v1Cluster.Spec.RKEConfig.MachineGlobalConfig.Data["kube-apiserver-arg"] = []string{
 			"enable-admission-plugins=NodeRestriction,PodSecurityPolicy,ServiceAccount",
 			"audit-policy-file=/var/lib/rancher/k3s/server/audit.yaml",
@@ -589,15 +774,46 @@ func HardenK3SRKE2ClusterConfig(clusterName, namespace, cni, cloudCredentialSecr
 			"request-timeout=300s",
 			"service-account-lookup=true",
 		}
+	} else {
+		v1Cluster.Spec.RKEConfig.MachineGlobalConfig.Data["kube-apiserver-arg"] = []string{
+			"admission-control-config-file=/var/lib/rancher/k3s/server/psa.yaml",
+			"audit-policy-file=/var/lib/rancher/k3s/server/audit.yaml",
+			"audit-log-path=/var/lib/rancher/k3s/server/logs/audit.log",
+			"audit-log-maxage=30",
+			"audit-log-maxbackup=10",
+			"audit-log-maxsize=100",
+			"request-timeout=300s",
+			"service-account-lookup=true",
+		}
+	}
 
+	v1Cluster.Spec.RKEConfig.MachineSelectorConfig = []rkev1.RKESystemConfig{
+		{
+			Config: rkev1.GenericMap{
+				Data: map[string]interface{}{
+					"kubelet-arg": []string{
+						"make-iptables-util-chains=true",
+					},
+					protectKernelDefaults: true,
+				},
+			},
+		},
+	}
+
+	return v1Cluster
+}
+
+// HardenRKE2ClusterConfig is a constructor for a apisV1.Cluster object, to be used by the rancher.Client.Provisioning client.
+func HardenRKE2ClusterConfig(clusterName, namespace string, clustersConfig *ClusterConfig, machinePools []apisV1.RKEMachinePool, cloudCredentialSecretName string) *apisV1.Cluster {
+	v1Cluster := NewK3SRKE2ClusterConfig(clusterName, namespace, clustersConfig, machinePools, cloudCredentialSecretName)
+
+	if clustersConfig.KubernetesVersion <= string(provisioninginput.PSPKubeVersionLimit) {
 		v1Cluster.Spec.RKEConfig.MachineSelectorConfig = []rkev1.RKESystemConfig{
 			{
 				Config: rkev1.GenericMap{
 					Data: map[string]interface{}{
-						"kubelet-arg": []string{
-							"make-iptables-util-chains=true",
-						},
-						"protect-kernel-defaults": true,
+						"profile":             "cis-1.6",
+						protectKernelDefaults: true,
 					},
 				},
 			},
@@ -607,7 +823,7 @@ func HardenK3SRKE2ClusterConfig(clusterName, namespace, cni, cloudCredentialSecr
 			{
 				Config: rkev1.GenericMap{
 					Data: map[string]interface{}{
-						"profile":                 "cis-1.6",
+						"profile":                 "cis-1.23",
 						"protect-kernel-defaults": true,
 					},
 				},
@@ -635,9 +851,8 @@ func CreateRKE1Cluster(client *rancher.Client, rke1Cluster *management.Cluster) 
 		_, err = client.Management.Cluster.ByID(cluster.ID)
 		if err != nil {
 			return false, nil
-		} else {
-			return true, nil
 		}
+		return true, nil
 	})
 
 	if err != nil {
@@ -703,9 +918,9 @@ func CreateK3SRKE2Cluster(client *rancher.Client, rke2Cluster *apisV1.Cluster) (
 		_, err = client.Steve.SteveType(ProvisioningSteveResourceType).ByID(cluster.ID)
 		if err != nil {
 			return false, nil
-		} else {
-			return true, nil
 		}
+
+		return true, nil
 	})
 
 	if err != nil {
@@ -758,6 +973,40 @@ func CreateK3SRKE2Cluster(client *rancher.Client, rke2Cluster *apisV1.Cluster) (
 	return cluster, nil
 }
 
+// DeleteKE1Cluster is a "helper" functions that takes a rancher client, and the rke1 cluster ID as parameters to delete
+// the cluster.
+func DeleteRKE1Cluster(client *rancher.Client, clusterID string) error {
+	cluster, err := client.Management.Cluster.ByID(clusterID)
+	if err != nil {
+		return err
+	}
+
+	logrus.Infof("Deleting cluster %s...", cluster.Name)
+	err = client.Management.Cluster.Delete(cluster)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// DeleteK3SRKE2Cluster is a "helper" functions that takes a rancher client, and the non-rke1 cluster ID as parameters to delete
+// the cluster.
+func DeleteK3SRKE2Cluster(client *rancher.Client, clusterID string) error {
+	cluster, err := client.Steve.SteveType(ProvisioningSteveResourceType).ByID(clusterID)
+	if err != nil {
+		return err
+	}
+
+	logrus.Infof("Deleting cluster %s...", cluster.Name)
+	err = client.Steve.SteveType(ProvisioningSteveResourceType).Delete(cluster)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // UpdateK3SRKE2Cluster is a "helper" functions that takes a rancher client, old rke2/k3s cluster config, and the new rke2/k3s cluster config as parameters.
 func UpdateK3SRKE2Cluster(client *rancher.Client, cluster *v1.SteveAPIObject, updatedCluster *apisV1.Cluster) (*v1.SteveAPIObject, error) {
 	updateCluster, err := client.Steve.SteveType(ProvisioningSteveResourceType).ByID(cluster.ID)
@@ -767,7 +1016,6 @@ func UpdateK3SRKE2Cluster(client *rancher.Client, cluster *v1.SteveAPIObject, up
 
 	updatedCluster.ObjectMeta.ResourceVersion = updateCluster.ObjectMeta.ResourceVersion
 
-	logrus.Infof("Applying cluster YAML hardening changes...")
 	cluster, err = client.Steve.SteveType(ProvisioningSteveResourceType).Update(cluster, updatedCluster)
 	if err != nil {
 		return nil, err
@@ -784,12 +1032,26 @@ func UpdateK3SRKE2Cluster(client *rancher.Client, cluster *v1.SteveAPIObject, up
 			return false, err
 		}
 
-		if clusterResp.ObjectMeta.State.Name == "active" {
-			logrus.Infof("Cluster YAML has successfully been updated!")
-			return true, nil
-		} else {
-			return false, nil
+		clusterStatus := &apisV1.ClusterStatus{}
+		err = v1.ConvertToK8sType(clusterResp.Status, clusterStatus)
+		if err != nil {
+			return false, err
 		}
+
+		if clusterResp.ObjectMeta.State.Name == "active" {
+			proxyClient, err := client.Steve.ProxyDownstream(clusterStatus.ClusterName)
+			if err != nil {
+				return false, err
+			}
+
+			_, err = proxyClient.SteveType(pods.PodResourceSteveType).List(nil)
+			if err != nil {
+				return false, nil
+			}
+			logrus.Infof("Cluster has been successfully updated!")
+			return true, nil
+		}
+		return false, nil
 	})
 
 	if err != nil {
@@ -892,9 +1154,11 @@ func logClusterInfoWithChanges(clusterID, clusterInfo string, summary summary.Su
 	return clusterInfo
 }
 
-func WatchAndWaitForCluster(steveClient *v1.Client, kubeProvisioningClient *kubeProvisioning.Client, ns string, clusterName string) error {
-	err := kwait.Poll(5*time.Second, 2*time.Minute, func() (done bool, err error) {
-		clusterResp, err := steveClient.SteveType(ProvisioningSteveResourceType).ByID(ns + "/" + clusterName)
+// WatchAndWaitForCluster is function that waits for a cluster to go unactive before checking its active state.
+func WatchAndWaitForCluster(client *rancher.Client, steveID string) error {
+	var clusterResp *v1.SteveAPIObject
+	err := kwait.Poll(500*time.Millisecond, 2*time.Minute, func() (done bool, err error) {
+		clusterResp, err = client.Steve.SteveType(ProvisioningSteveResourceType).ByID(steveID)
 		if err != nil {
 			return false, err
 		}
@@ -905,8 +1169,18 @@ func WatchAndWaitForCluster(steveClient *v1.Client, kubeProvisioningClient *kube
 		return err
 	}
 	logrus.Infof("waiting for cluster to be up.............")
-	result, err := kubeProvisioningClient.Clusters(ns).Watch(context.TODO(), metav1.ListOptions{
-		FieldSelector:  "metadata.name=" + clusterName,
+
+	adminClient, err := rancher.NewClient(client.RancherConfig.AdminToken, client.Session)
+	if err != nil {
+		return err
+	}
+	kubeProvisioningClient, err := adminClient.GetKubeAPIProvisioningClient()
+	if err != nil {
+		return err
+	}
+
+	result, err := kubeProvisioningClient.Clusters(clusterResp.ObjectMeta.Namespace).Watch(context.TODO(), metav1.ListOptions{
+		FieldSelector:  "metadata.name=" + clusterResp.Name,
 		TimeoutSeconds: &defaults.WatchTimeoutSeconds,
 	})
 	if err != nil {
@@ -931,4 +1205,27 @@ func GetProvisioningClusterByName(client *rancher.Client, clusterName string, na
 	}
 
 	return cluster, clusterObj, nil
+}
+
+// WaitForActiveCluster is a "helper" function that waits for the cluster to reach the active state.
+// The function accepts a Rancher client and a cluster ID as parameters.
+func WaitForActiveRKE1Cluster(client *rancher.Client, clusterID string) error {
+	err := kwait.Poll(500*time.Millisecond, 30*time.Minute, func() (done bool, err error) {
+		client, err = client.ReLogin()
+		if err != nil {
+			return false, err
+		}
+		clusterResp, err := client.Management.Cluster.ByID(clusterID)
+		if err != nil {
+			return false, err
+		}
+		if clusterResp.State == "active" {
+			return true, nil
+		}
+		return false, nil
+	})
+	if err != nil {
+		return err
+	}
+	return nil
 }

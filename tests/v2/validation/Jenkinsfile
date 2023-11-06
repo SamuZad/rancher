@@ -12,7 +12,7 @@ node {
     def testResultsOut = "results.xml"
     def envFile = ".env"
     def rancherConfig = "rancher_env.config"
-    def branch = "release/v2.7"
+    def branch = "release/v2.8"
     if ("${env.BRANCH}" != "null" && "${env.BRANCH}" != "") {
       branch = "${env.BRANCH}"
     }
@@ -113,7 +113,7 @@ node {
               stage('Run Validation Tests') {
                 try {
                   sh "docker run --name ${testContainer} -t --env-file ${envFile} " +
-                  "${imageName} sh -c \"/root/go/bin/gotestsum --format standard-verbose --packages=${testsDir} --junitfile ${testResultsOut} -- ${GOTEST_TESTCASE} -timeout=${timeout} -v\""
+                  "${imageName} sh -c \"/root/go/bin/gotestsum --format standard-verbose --packages=${testsDir} --junitfile ${testResultsOut} -- -tags=${TAGS} ${GOTEST_TESTCASE} -timeout=${timeout} -v\""
                 } catch(err) {
                   echo 'Test run had failures. Collecting results...'
                 }

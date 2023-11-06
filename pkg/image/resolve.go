@@ -38,14 +38,17 @@ var osTypeImageListName = map[OSType]string{
 	Linux:   "rancher-images",
 }
 
+// Resolve calls ResolveWithCluster passing nil into the cluster argument.
+// returns the image concatenated with the URL of the system default registry.
+// if there is no system default registry it will return the image
 func Resolve(image string) string {
 	return ResolveWithCluster(image, nil)
 }
 
+// ResolveWithCluster returns the image concatenated with the URL of the private registry specified, adding rancher/ if is a private repo.
+// It will use the cluster level registry if one is found, or the system default registry if no cluster level registry is found.
+// If either is not found, it returns the image.
 func ResolveWithCluster(image string, cluster *v3.Cluster) string {
-	if cluster == nil {
-		return image
-	}
 	reg := util.GetPrivateRegistryURL(cluster)
 	if reg != "" && !strings.HasPrefix(image, reg) {
 		// Images from Dockerhub Library repo, we add rancher prefix when using private registry
@@ -77,6 +80,14 @@ func GetImages(exportConfig ExportConfig, externalImages map[string][]string, im
 	system := System{exportConfig}
 	if err := system.FetchImages(rkeSystemImages, imagesSet); err != nil {
 		return nil, nil, errors.Wrap(err, "failed to fetch images from system")
+	}
+
+	// fetch images from extension catalog images
+	extensions := ExtensionsConfig{
+		GithubEndpoints: ExtensionEndpoints,
+	}
+	if err := extensions.FetchExtensionImages(imagesSet); err != nil {
+		return nil, nil, errors.Wrap(err, "failed to fetch images from extensions")
 	}
 
 	setRequirementImages(exportConfig.OsType, imagesSet)

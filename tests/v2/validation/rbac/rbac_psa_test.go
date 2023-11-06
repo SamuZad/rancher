@@ -1,3 +1,5 @@
+//go:build (validation || infra.any || cluster.any || stress) && !sanity && !extended
+
 package rbac
 
 import (
@@ -10,6 +12,7 @@ import (
 	v1 "github.com/rancher/rancher/tests/framework/clients/rancher/v1"
 	"github.com/rancher/rancher/tests/framework/extensions/clusters"
 	"github.com/rancher/rancher/tests/framework/extensions/namespaces"
+	psadeploy "github.com/rancher/rancher/tests/framework/extensions/psact"
 	"github.com/rancher/rancher/tests/framework/extensions/users"
 	namegen "github.com/rancher/rancher/tests/framework/pkg/namegenerator"
 	"github.com/rancher/rancher/tests/framework/pkg/session"
@@ -38,9 +41,14 @@ type PSATestSuite struct {
 	adminNamespace      *v1.SteveAPIObject
 	stdUserNamespace    *v1.SteveAPIObject
 	psaRole             *management.RoleTemplate
+	clusterName         string
+	clusterID           string
 }
 
 func (rb *PSATestSuite) TearDownSuite() {
+	// reset the PSACT
+	_, err := editPsactCluster(rb.client, rb.clusterName, defaultNamespace, "")
+	require.NoError(rb.T(), err)
 	rb.session.Cleanup()
 }
 
@@ -52,11 +60,11 @@ func (rb *PSATestSuite) SetupSuite() {
 	require.NoError(rb.T(), err)
 
 	rb.client = client
-	clusterName := client.RancherConfig.ClusterName
-	require.NotEmptyf(rb.T(), clusterName, "Cluster name to install should be set")
-	clusterID, err := clusters.GetClusterIDByName(rb.client, clusterName)
+	rb.clusterName = client.RancherConfig.ClusterName
+	require.NotEmptyf(rb.T(), rb.clusterName, "Cluster name to install should be set")
+	rb.clusterID, err = clusters.GetClusterIDByName(rb.client, rb.clusterName)
 	require.NoError(rb.T(), err, "Error getting cluster ID")
-	rb.cluster, err = rb.client.Management.Cluster.ByID(clusterID)
+	rb.cluster, err = rb.client.Management.Cluster.ByID(rb.clusterID)
 	require.NoError(rb.T(), err)
 
 	context := "cluster"
@@ -250,35 +258,53 @@ func (rb *PSATestSuite) ValidateAdditionalPSA(role string) {
 	}
 }
 
+func (rb *PSATestSuite) ValidateEditPsactCluster(role string, psact string) {
+	clusterType, err := editPsactCluster(rb.nonAdminUserClient, rb.clusterName, defaultNamespace, psact)
+	switch role {
+	case roleOwner, restrictedAdmin:
+		require.NoError(rb.T(), err)
+		err = psadeploy.CreateNginxDeployment(rb.nonAdminUserClient, rb.clusterID, psact)
+		require.NoError(rb.T(), err)
+	case roleMember, roleProjectOwner, roleProjectMember, roleProjectReadOnly:
+		require.Error(rb.T(), err)
+		if clusterType == "RKE2K3S" {
+			assert.Equal(rb.T(), "Resource type [provisioning.cattle.io.cluster] is not updatable", err.Error())
+		} else {
+			errStatus := strings.Split(err.Error(), ".")[1]
+			rgx := regexp.MustCompile(`\[(.*?)\]`)
+			errorMsg := rgx.FindStringSubmatch(errStatus)
+			assert.Equal(rb.T(), "403 Forbidden", errorMsg[1])
+		}
+	}
+}
+
 func (rb *PSATestSuite) TestPSA() {
-	nonAdminUserRoles := [...]string{roleMember, restrictedAdmin, roleOwner, roleProjectOwner , roleProjectReadOnly, roleProjectMember, roleCustomCreateNS} 
+	nonAdminUserRoles := [...]string{roleMember, restrictedAdmin, roleOwner, roleProjectOwner, roleProjectReadOnly, roleProjectMember, roleCustomCreateNS}
 	for _, role := range nonAdminUserRoles {
 		var customRole bool
 		if role == roleCustomCreateNS {
 			customRole = true
 		}
-		rb.Run("Add PSA labels on the namespaces created by admins ", func() {
-			createProjectAsAdmin, err := createProject(rb.client, rb.cluster.ID)
-			rb.adminProject = createProjectAsAdmin
-			require.NoError(rb.T(), err)
+		createProjectAsAdmin, err := createProject(rb.client, rb.cluster.ID)
+		rb.adminProject = createProjectAsAdmin
+		require.NoError(rb.T(), err)
 
-			steveAdminClient, err := rb.client.Steve.ProxyDownstream(rb.cluster.ID)
-			require.NoError(rb.T(), err)
-			rb.steveAdminClient = steveAdminClient
-			namespaceName := namegen.AppendRandomString("testns-")
-			labels := map[string]string{
-				psaWarn:    pssRestrictedPolicy,
-				psaEnforce: pssRestrictedPolicy,
-				psaAudit:   pssRestrictedPolicy,
-			}
-			adminNamespace, err := namespaces.CreateNamespace(rb.client, namespaceName+"-admin", "{}", labels, map[string]string{}, rb.adminProject)
-			require.NoError(rb.T(), err)
-			expectedPSALabels := getPSALabels(adminNamespace, labels)
-			assert.Equal(rb.T(), labels, expectedPSALabels)
-			rb.adminNamespace = adminNamespace
-			_, err = createDeploymentAndWait(rb.steveAdminClient, rb.client, rb.cluster.ID, containerName, containerImage, rb.adminNamespace.Name)
-			require.Error(rb.T(), err)
-		})
+		steveAdminClient, err := rb.client.Steve.ProxyDownstream(rb.cluster.ID)
+		require.NoError(rb.T(), err)
+		rb.steveAdminClient = steveAdminClient
+		namespaceName := namegen.AppendRandomString("testns-")
+		labels := map[string]string{
+			psaWarn:    pssRestrictedPolicy,
+			psaEnforce: pssRestrictedPolicy,
+			psaAudit:   pssRestrictedPolicy,
+		}
+		adminNamespace, err := namespaces.CreateNamespace(rb.client, namespaceName+"-admin", "{}", labels, map[string]string{}, rb.adminProject)
+		require.NoError(rb.T(), err)
+		expectedPSALabels := getPSALabels(adminNamespace, labels)
+		assert.Equal(rb.T(), labels, expectedPSALabels)
+		rb.adminNamespace = adminNamespace
+		_, err = createDeploymentAndWait(rb.steveAdminClient, rb.client, rb.cluster.ID, containerName, containerImage, rb.adminNamespace.Name)
+		require.Error(rb.T(), err)
 
 		rb.Run("Create a user with global role "+role, func() {
 			var userRole string
@@ -287,7 +313,8 @@ func (rb *PSATestSuite) TestPSA() {
 			} else {
 				userRole = standardUser
 			}
-			newUser, err := createUser(rb.client, userRole)
+			newUser, err := users.CreateUserWithRole(rb.client, users.UserConfig(), userRole)
+
 			require.NoError(rb.T(), err)
 			rb.nonAdminUser = newUser
 			rb.T().Logf("Created user: %v", rb.nonAdminUser.Username)
@@ -300,10 +327,10 @@ func (rb *PSATestSuite) TestPSA() {
 			log.Info("Adding user as " + role + " to the downstream cluster.")
 			if role != restrictedAdmin {
 				if strings.Contains(role, "project") || role == roleProjectReadOnly || role == roleCustomCreateNS {
-					err := users.AddProjectMember(rb.client, rb.adminProject, rb.nonAdminUser, role)
+					err := users.AddProjectMember(rb.client, rb.adminProject, rb.nonAdminUser, role, nil)
 					require.NoError(rb.T(), err)
 				} else {
-					err := users.AddClusterRoleToUser(rb.client, rb.cluster, rb.nonAdminUser, role)
+					err := users.AddClusterRoleToUser(rb.client, rb.cluster, rb.nonAdminUser, role, nil)
 					require.NoError(rb.T(), err)
 				}
 				rb.nonAdminUserClient, err = rb.nonAdminUserClient.ReLogin()
@@ -328,7 +355,7 @@ func (rb *PSATestSuite) TestPSA() {
 
 		if strings.Contains(role, "project") || role == roleCustomCreateNS {
 			rb.Run("Additional testcase - Validate if "+role+" with an additional role update-psa can add/edit/delete labels from admin created namespace", func() {
-				err := users.AddClusterRoleToUser(rb.client, rb.cluster, rb.nonAdminUser, rb.psaRole.ID)
+				err := users.AddClusterRoleToUser(rb.client, rb.cluster, rb.nonAdminUser, rb.psaRole.ID, nil)
 				require.NoError(rb.T(), err)
 				rb.ValidatePSA(psaRole, customRole)
 			})
@@ -336,6 +363,60 @@ func (rb *PSATestSuite) TestPSA() {
 	}
 }
 
-func TestPSATestSuite(t *testing.T) {
+func (rb *PSATestSuite) TestPsactRBAC() {
+	tests := []struct {
+		name   string
+		role   string
+		member string
+	}{
+		{"Cluster Owner", roleOwner, standardUser},
+		{"Cluster Member", roleMember, standardUser},
+		{"Project Owner", roleProjectOwner, standardUser},
+		{"Project Member", roleProjectMember, standardUser},
+		{"Project Read Only", roleProjectReadOnly, standardUser},
+		{"Restricted Admin", restrictedAdmin, restrictedAdmin},
+	}
+	for _, tt := range tests {
+		rb.Run("Set up User with Cluster Role "+tt.name, func() {
+			newUser, err := users.CreateUserWithRole(rb.client, users.UserConfig(), tt.member)
+			require.NoError(rb.T(), err)
+			rb.nonAdminUser = newUser
+			rb.T().Logf("Created user: %v", rb.nonAdminUser.Username)
+			rb.nonAdminUserClient, err = rb.client.AsUser(newUser)
+			require.NoError(rb.T(), err)
+
+			subSession := rb.session.NewSession()
+			defer subSession.Cleanup()
+
+			createProjectAsAdmin, err := createProject(rb.client, rb.cluster.ID)
+			rb.adminProject = createProjectAsAdmin
+			require.NoError(rb.T(), err)
+		})
+		rb.Run("Adding user as "+tt.name+" to the downstream cluster.", func() {
+			if tt.member == standardUser {
+				if strings.Contains(tt.role, "project") || tt.role == roleProjectReadOnly {
+					err := users.AddProjectMember(rb.client, rb.adminProject, rb.nonAdminUser, tt.role, nil)
+					require.NoError(rb.T(), err)
+				} else {
+					err := users.AddClusterRoleToUser(rb.client, rb.cluster, rb.nonAdminUser, tt.role, nil)
+					require.NoError(rb.T(), err)
+				}
+			}
+			relogin, err := rb.nonAdminUserClient.ReLogin()
+			require.NoError(rb.T(), err)
+			rb.nonAdminUserClient = relogin
+		})
+
+		rb.T().Logf("Starting validations for %v", tt.role)
+		rb.Run("Test case - Edit cluster as a "+tt.name+" and disable psact.", func() {
+			rb.ValidateEditPsactCluster(tt.role, "")
+		})
+		rb.Run("Test case - Edit cluster as a "+tt.name+" and set psact to rancher-restricted.", func() {
+			rb.ValidateEditPsactCluster(tt.role, "rancher-restricted")
+		})
+	}
+}
+
+func TestRBACPSATestSuite(t *testing.T) {
 	suite.Run(t, new(PSATestSuite))
 }

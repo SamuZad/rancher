@@ -12,11 +12,10 @@ import (
 	"github.com/rancher/rancher/pkg/features"
 	fleetconst "github.com/rancher/rancher/pkg/fleet"
 	"github.com/rancher/rancher/pkg/settings"
-	corev1 "github.com/rancher/wrangler/pkg/generated/controllers/core/v1"
+	ctrlfake "github.com/rancher/wrangler/pkg/generic/fake"
 	"github.com/stretchr/testify/assert"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 )
 
 var (
@@ -35,15 +34,13 @@ func Test_ChartInstallation(t *testing.T) {
 		os.Unsetenv("NO_PROXY")
 		defer os.Setenv("NO_PROXY", oldVal)
 	}
-	setting := &v3.Setting{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: settings.ServerURL.Name,
-		},
+	stgs := []string{
+		settings.ServerURL.Name,
+		settings.CACerts.Name,
+		settings.SystemDefaultRegistry.Name,
+		settings.FleetMinVersion.Name,
+		settings.FleetVersion.Name,
 	}
-	h := &handler{
-		chartsConfig: chart.RancherConfigGetter{ConfigCache: &mockCache{}},
-	}
-
 	tests := []struct {
 		name       string
 		newManager func(*gomock.Controller) chart.Manager
@@ -51,6 +48,61 @@ func Test_ChartInstallation(t *testing.T) {
 	}{
 		{
 			name: "normal installation",
+			newManager: func(ctrl *gomock.Controller) chart.Manager {
+				settings.ConfigMapName.Set("pass")
+				settings.FleetMinVersion.Set("")
+
+				manager := fake.NewMockManager(ctrl)
+				expectedValues := map[string]interface{}{
+					"apiServerURL": settings.ServerURL.Get(),
+					"apiServerCA":  settings.CACerts.Get(),
+					"global": map[string]interface{}{
+						"cattle": map[string]interface{}{
+							"systemDefaultRegistry": settings.SystemDefaultRegistry.Get(),
+						},
+					},
+					"bootstrap": map[string]interface{}{
+						"enabled":        false,
+						"agentNamespace": fleetconst.ReleaseLocalNamespace,
+					},
+					"gitops": map[string]interface{}{
+						"enabled": features.Gitops.Enabled(),
+					},
+					"gitjob": map[string]interface{}{
+						"priorityClassName": priorityClassName,
+					},
+					"priorityClassName": priorityClassName,
+				}
+
+				exactVersion := "0.7.0"
+				settings.FleetVersion.Set(exactVersion)
+
+				var b bool
+				manager.EXPECT().Ensure(
+					fleetconst.ReleaseNamespace,
+					fleetconst.CRDChartName,
+					exactVersion,
+					"",
+					nil,
+					gomock.AssignableToTypeOf(b),
+					"",
+				).Return(nil).Times(len(stgs))
+				manager.EXPECT().Ensure(
+					fleetconst.ReleaseNamespace,
+					fleetconst.ChartName,
+					exactVersion,
+					"",
+					expectedValues,
+					gomock.AssignableToTypeOf(b),
+					"",
+				).Return(nil).Times(len(stgs))
+
+				manager.EXPECT().Uninstall(fleetconst.ReleaseLegacyNamespace, fleetconst.ChartName).Return(nil).Times(len(stgs))
+				return manager
+			},
+		},
+		{
+			name: "normal installation with min version precedence",
 			newManager: func(ctrl *gomock.Controller) chart.Manager {
 				settings.ConfigMapName.Set("pass")
 				manager := fake.NewMockManager(ctrl)
@@ -74,34 +126,42 @@ func Test_ChartInstallation(t *testing.T) {
 					},
 					"priorityClassName": priorityClassName,
 				}
+
+				minVersion := "0.7.0"
+				exactVersion := "0.7.1"
+				settings.FleetVersion.Set(exactVersion)
+				settings.FleetMinVersion.Set(minVersion)
+
 				var b bool
 				manager.EXPECT().Ensure(
 					fleetconst.ReleaseNamespace,
 					fleetconst.CRDChartName,
-					settings.FleetMinVersion.Get(),
+					minVersion,
 					"",
 					nil,
 					gomock.AssignableToTypeOf(b),
 					"",
-				).Return(nil)
+				).Return(nil).Times(len(stgs))
 				manager.EXPECT().Ensure(
 					fleetconst.ReleaseNamespace,
 					fleetconst.ChartName,
-					settings.FleetMinVersion.Get(),
+					minVersion,
 					"",
 					expectedValues,
 					gomock.AssignableToTypeOf(b),
 					"",
-				).Return(nil)
+				).Return(nil).Times(len(stgs))
 
-				manager.EXPECT().Uninstall(fleetconst.ReleaseLegacyNamespace, fleetconst.ChartName).Return(nil)
+				manager.EXPECT().Uninstall(fleetconst.ReleaseLegacyNamespace, fleetconst.ChartName).Return(nil).Times(len(stgs))
 				return manager
 			},
 		},
 		{
-			name: "installation without webhook priority class",
+			name: "installation without priority class",
 			newManager: func(ctrl *gomock.Controller) chart.Manager {
 				settings.ConfigMapName.Set("fail")
+				settings.FleetMinVersion.Set("")
+
 				manager := fake.NewMockManager(ctrl)
 				expectedValues := map[string]interface{}{
 					"apiServerURL": settings.ServerURL.Get(),
@@ -123,23 +183,23 @@ func Test_ChartInstallation(t *testing.T) {
 				manager.EXPECT().Ensure(
 					fleetconst.ReleaseNamespace,
 					fleetconst.CRDChartName,
-					settings.FleetMinVersion.Get(),
+					settings.FleetVersion.Get(),
 					"",
 					nil,
 					gomock.AssignableToTypeOf(b),
 					"",
-				).Return(nil)
+				).Return(nil).Times(len(stgs))
 				manager.EXPECT().Ensure(
 					fleetconst.ReleaseNamespace,
 					fleetconst.ChartName,
-					settings.FleetMinVersion.Get(),
+					settings.FleetVersion.Get(),
 					"",
 					expectedValues,
 					gomock.AssignableToTypeOf(b),
 					"",
-				).Return(nil)
+				).Return(nil).Times(len(stgs))
 
-				manager.EXPECT().Uninstall(fleetconst.ReleaseLegacyNamespace, fleetconst.ChartName).Return(nil)
+				manager.EXPECT().Uninstall(fleetconst.ReleaseLegacyNamespace, fleetconst.ChartName).Return(nil).Times(len(stgs))
 				return manager
 			},
 		},
@@ -147,40 +207,21 @@ func Test_ChartInstallation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctrl := gomock.NewController(t)
-			h.manager = tt.newManager(ctrl)
-			_, err := h.onSetting("", setting)
-			if tt.wantErr {
-				assert.Error(t, err, "handler.onRepo() error = %v, wantErr %v", err, tt.wantErr)
-				return
+			configCache := ctrlfake.NewMockCacheInterface[*v1.ConfigMap](ctrl)
+			configCache.EXPECT().Get(gomock.Any(), "pass").Return(&v1.ConfigMap{Data: map[string]string{"priorityClassName": priorityClassName}}, nil).AnyTimes()
+			configCache.EXPECT().Get(gomock.Any(), gomock.Any()).Return(nil, fmt.Errorf("not found")).AnyTimes()
+			h := &handler{
+				chartsConfig: chart.RancherConfigGetter{ConfigCache: configCache},
 			}
-			assert.NoError(t, err, "unexpected error")
+			h.manager = tt.newManager(ctrl)
+			for _, setting := range stgs {
+				_, err := h.onSetting("", &v3.Setting{ObjectMeta: metav1.ObjectMeta{Name: setting}})
+				if tt.wantErr {
+					assert.Error(t, err, "handler.onRepo() error = %v, wantErr %v", err, tt.wantErr)
+					return
+				}
+				assert.NoError(t, err, "unexpected error")
+			}
 		})
 	}
-}
-
-type mockCache struct {
-	Maps []*v1.ConfigMap
-}
-
-func (m *mockCache) Get(namespace string, name string) (*v1.ConfigMap, error) {
-	if name != "pass" {
-		return nil, errNotFound
-	}
-	return &v1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-		},
-		Data: map[string]string{"priorityClassName": priorityClassName},
-	}, nil
-}
-
-func (m *mockCache) List(namespace string, selector labels.Selector) ([]*v1.ConfigMap, error) {
-	return nil, errUnimplemented
-}
-
-func (m *mockCache) AddIndexer(indexName string, indexer corev1.ConfigMapIndexer) {}
-
-func (m *mockCache) GetByIndex(indexName, key string) ([]*v1.ConfigMap, error) {
-	return nil, errUnimplemented
 }

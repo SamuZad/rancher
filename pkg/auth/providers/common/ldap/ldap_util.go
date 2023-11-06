@@ -136,8 +136,7 @@ func GetUserSearchAttributes(memberOfAttribute, ObjectClass string, config *v32.
 		config.UserObjectClass,
 		config.UserLoginAttribute,
 		config.UserNameAttribute,
-		config.UserEnabledAttribute,
-		"objectGUID"}
+		config.UserEnabledAttribute}
 	return userSearchAttributes
 }
 
@@ -171,7 +170,7 @@ func GetGroupSearchAttributesForLDAP(ObjectClass string, config *v3.LdapConfig) 
 	return groupSeachAttributes
 }
 
-func AuthenticateServiceAccountUser(serviceAccountPassword string, serviceAccountUsername string, defaultLoginDomain string, lConn *ldapv3.Conn) error {
+func AuthenticateServiceAccountUser(serviceAccountPassword string, serviceAccountUsername string, defaultLoginDomain string, lConn ldapv3.Client) error {
 	logrus.Debug("Binding service account username password")
 	if serviceAccountPassword == "" {
 		return httperror.NewAPIError(httperror.MissingRequired, "service account password not provided")
@@ -188,7 +187,7 @@ func AuthenticateServiceAccountUser(serviceAccountPassword string, serviceAccoun
 	return nil
 }
 
-func AttributesToPrincipal(attribs []*ldapv3.EntryAttribute, dnStr, scope, providerName, userObjectClass, userNameAttribute, userLoginAttribute, groupObjectClass, groupNameAttribute, objectGUID string) (*v3.Principal, error) {
+func AttributesToPrincipal(attribs []*ldapv3.EntryAttribute, dnStr, scope, providerName, userObjectClass, userNameAttribute, userLoginAttribute, groupObjectClass, groupNameAttribute string) (*v3.Principal, error) {
 	var externalIDType, accountName, externalID, login, kind string
 	externalID = dnStr
 	externalIDType = scope
@@ -235,15 +234,8 @@ func AttributesToPrincipal(attribs []*ldapv3.EntryAttribute, dnStr, scope, provi
 		return nil, fmt.Errorf("Failed to get attributes for %s", dnStr)
 	}
 
-	var metaName string
-	if kind == "group" || objectGUID == "" {
-		metaName = externalIDType + "://" + dnStr
-	} else {
-		metaName = externalIDType + "://" + objectGUID
-	}
-
 	principal := &v3.Principal{
-		ObjectMeta:    metav1.ObjectMeta{Name: metaName},
+		ObjectMeta:    metav1.ObjectMeta{Name: externalIDType + "://" + externalID},
 		DisplayName:   accountName,
 		LoginName:     login,
 		PrincipalType: kind,
@@ -253,7 +245,7 @@ func AttributesToPrincipal(attribs []*ldapv3.EntryAttribute, dnStr, scope, provi
 	return principal, nil
 }
 
-func GatherParentGroups(groupPrincipal v3.Principal, searchDomain string, groupScope string, config *ConfigAttributes, lConn *ldapv3.Conn,
+func GatherParentGroups(groupPrincipal v3.Principal, searchDomain string, groupScope string, config *ConfigAttributes, lConn ldapv3.Client,
 	groupMap map[string]bool, nestedGroupPrincipals *[]v3.Principal, searchAttributes []string) error {
 	groupMap[groupPrincipal.ObjectMeta.Name] = true
 	principals := []v3.Principal{}
@@ -275,7 +267,7 @@ func GatherParentGroups(groupPrincipal v3.Principal, searchDomain string, groupS
 
 	for i := 0; i < len(resultGroups.Entries); i++ {
 		entry := resultGroups.Entries[i]
-		principal, err := AttributesToPrincipal(entry.Attributes, entry.DN, groupScope, config.ProviderName, config.UserObjectClass, config.UserNameAttribute, config.UserLoginAttribute, config.GroupObjectClass, config.GroupNameAttribute, "")
+		principal, err := AttributesToPrincipal(entry.Attributes, entry.DN, groupScope, config.ProviderName, config.UserObjectClass, config.UserNameAttribute, config.UserLoginAttribute, config.GroupObjectClass, config.GroupNameAttribute)
 		if err != nil {
 			logrus.Errorf("Error translating group result: %v", err)
 			continue

@@ -1,18 +1,29 @@
+//go:build validation
+
 package upgrade
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/rancher/rancher/tests/framework/clients/rancher"
 	"github.com/rancher/rancher/tests/framework/extensions/clusters"
 	"github.com/rancher/rancher/tests/framework/extensions/clusters/bundledclusters"
+	"github.com/rancher/rancher/tests/framework/extensions/defaults"
 	nodestat "github.com/rancher/rancher/tests/framework/extensions/nodes"
+	"github.com/rancher/rancher/tests/framework/extensions/provisioninginput"
 	psadeploy "github.com/rancher/rancher/tests/framework/extensions/psact"
 	"github.com/rancher/rancher/tests/framework/extensions/workloads/pods"
 	"github.com/rancher/rancher/tests/framework/pkg/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
+)
+
+const (
+	rke1KubeVersionCheck = "rancher"
+	rke2KubeVersionCheck = "rke2"
+	k3sKubeVersionCheck  = "k3s"
 )
 
 type UpgradeKubernetesTestSuite struct {
@@ -110,23 +121,22 @@ func (u *UpgradeKubernetesTestSuite) testUpgradeSingleCluster(clusterName, versi
 		u.T().Logf("[%v]: Validating updated cluster's nodepools kubernetes versions", clusterName)
 		validateNodepoolVersions(u.T(), client, updatedCluster, version, !isCheckingCurrentCluster)
 	}
-
-	err = nodestat.IsNodeReady(client, clusterMeta.ID)
+	if strings.Contains(versionToUpgrade, rke1KubeVersionCheck) {
+		err = nodestat.AllManagementNodeReady(client, clusterMeta.ID, defaults.ThirtyMinuteTimeout)
+	} else if strings.Contains(versionToUpgrade, rke2KubeVersionCheck) || strings.Contains(versionToUpgrade, k3sKubeVersionCheck) {
+		err = nodestat.AllMachineReady(client, clusterMeta.ID, defaults.TenMinuteTimeout)
+	}
 	require.NoError(u.T(), err)
 
 	clusterToken, err := clusters.CheckServiceAccountTokenSecret(client, clusterName)
 	require.NoError(u.T(), err)
 	assert.NotEmpty(u.T(), clusterToken)
 
-	if psact == string(RancherPrivileged) || psact == string(RancherRestricted) {
-		err = psadeploy.CheckPSACT(client, clusterName)
-		require.NoError(u.T(), err)
-
-		_, err = psadeploy.CreateNginxDeployment(client, clusterMeta.ID, psact)
+	if psact == string(provisioninginput.RancherPrivileged) || psact == string(provisioninginput.RancherRestricted) || psact == string(provisioninginput.RancherBaseline) {
+		err := psadeploy.CreateNginxDeployment(client, clusterMeta.ID, psact)
 		require.NoError(u.T(), err)
 	}
 
-	podResults, podErrors := pods.StatusPods(client, clusterMeta.ID)
-	assert.NotEmpty(u.T(), podResults)
+	podErrors := pods.StatusPods(client, clusterMeta.ID)
 	assert.Empty(u.T(), podErrors)
 }
