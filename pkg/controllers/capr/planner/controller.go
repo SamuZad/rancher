@@ -54,7 +54,7 @@ func Register(ctx context.Context, clients *wrangler.Context, planner *caprplann
 			}
 			return relatedResources, nil
 		} else if machine, ok := obj.(*capi.Machine); ok {
-			clusterName := machine.Labels[capi.ClusterLabelName]
+			clusterName := machine.Labels[capi.ClusterNameLabel]
 			if clusterName != "" {
 				logrus.Tracef("[planner] rkecluster %s/%s enqueue triggered by machine %s/%s", machine.Namespace, clusterName, machine.Namespace, machine.Name)
 				return []relatedresource.Key{{
@@ -96,7 +96,7 @@ func (h *handler) OnChange(cp *rkev1.RKEControlPlane, status rkev1.RKEControlPla
 		// * generic.ErrSkip - These will cause the object to be re-enqueued after 5 seconds.
 		// * error - All other errors. This should be an actual error during planner processing.
 		if caprplanner.IsErrWaiting(err) {
-			logrus.Infof("[planner] rkecluster %s/%s: waiting: %v", cp.Namespace, cp.Name, err)
+			logrus.Infof("[planner] rkecluster %s/%s: %v", cp.Namespace, cp.Name, err)
 			capr.Ready.SetStatus(&status, "Unknown")
 			capr.Ready.Message(&status, err.Error())
 			capr.Ready.Reason(&status, "Waiting")
@@ -114,7 +114,7 @@ func (h *handler) OnChange(cp *rkev1.RKEControlPlane, status rkev1.RKEControlPla
 			return status, err
 		} else {
 			// An actual error occurred, so set the Ready and Reconciled conditions to this error and return
-			logrus.Errorf("[planner] rkecluster %s/%s: error encountered during plan processing was %v", cp.Namespace, cp.Name, err)
+			logrus.Errorf("[planner] rkecluster %s/%s: error during plan processing: %v", cp.Namespace, cp.Name, err)
 			capr.Ready.SetError(&status, "", err)
 			capr.Reconciled.SetError(&status, "", err)
 			return status, err

@@ -74,6 +74,8 @@ const (
 	UnCordonAnnotation            = "rke.cattle.io/uncordon"
 	WorkerRoleLabel               = "rke.cattle.io/worker-role"
 	AuthorizedObjectAnnotation    = "rke.cattle.io/object-authorized-for-clusters"
+	PlanUpdatedTimeAnnotation     = "rke.cattle.io/plan-last-updated"
+	PlanProbesPassedAnnotation    = "rke.cattle.io/plan-probes-passed"
 
 	JoinServerImplausible = "implausible"
 
@@ -223,6 +225,20 @@ func GetRuntimeSupervisorPort(kubernetesVersion string) int {
 	return 6443
 }
 
+func GetLoopbackAddress(controlPlane *rkev1.RKEControlPlane) string {
+	stackPreference := rkev1.DefaultStackPreference
+	if networking := controlPlane.Spec.Networking; networking != nil && networking.StackPreference != "" {
+		stackPreference = networking.StackPreference
+	}
+	if stackPreference == rkev1.SingleStackIPv6Preference {
+		return "[::1]"
+	}
+	if stackPreference == rkev1.DualStackPreference {
+		return "localhost"
+	}
+	return "127.0.0.1"
+}
+
 func IsOwnedByMachine(bootstrapCache rkecontroller.RKEBootstrapCache, machineName string, sa *corev1.ServiceAccount) (bool, error) {
 	for _, owner := range sa.OwnerReferences {
 		if owner.Kind == "RKEBootstrap" {
@@ -279,7 +295,7 @@ func GetPlanServiceAccountTokenSecret(secretClient corecontrollers.SecretControl
 	if planSA == nil {
 		return nil, false, fmt.Errorf("planSA was nil")
 	}
-	secret, err := serviceaccounttoken.EnsureSecretForServiceAccount(context.Background(), secretClient.Cache().Get, k8s, planSA)
+	secret, err := serviceaccounttoken.EnsureSecretForServiceAccount(context.Background(), secretClient.Cache(), k8s, planSA)
 	if err != nil {
 		return nil, false, fmt.Errorf("error ensuring secret for service account [%s:%s]: %w", planSA.Namespace, planSA.Name, err)
 	}
@@ -339,7 +355,7 @@ func GetMachineDeletionStatus(machines []*capi.Machine) (string, error) {
 
 // GetMachineFromNode attempts to find the corresponding machine for an etcd snapshot that is found in the configmap. If the machine list is successful, it will return true on the boolean, otherwise, it can be assumed that a false, nil, and defined error indicate the machine does not exist.
 func GetMachineFromNode(machineCache capicontrollers.MachineCache, nodeName string, cluster *provv1.Cluster) (bool, *capi.Machine, error) {
-	ls, err := labels.Parse(fmt.Sprintf("%s=%s", capi.ClusterLabelName, cluster.Name))
+	ls, err := labels.Parse(fmt.Sprintf("%s=%s", capi.ClusterNameLabel, cluster.Name))
 	if err != nil {
 		return false, nil, err
 	}
@@ -428,11 +444,11 @@ func GetCAPIClusterFromLabel(obj runtime.Object, cache capicontrollers.ClusterCa
 	if err != nil {
 		return nil, err
 	}
-	clusterName := data.String("metadata", "labels", capi.ClusterLabelName)
+	clusterName := data.String("metadata", "labels", capi.ClusterNameLabel)
 	if clusterName != "" {
 		return cache.Get(data.String("metadata", "namespace"), clusterName)
 	}
-	return nil, fmt.Errorf("%s label not present on %s: %s/%s", capi.ClusterLabelName, obj.GetObjectKind().GroupVersionKind().Kind, data.String("metadata", "namespace"), data.String("metadata", "name"))
+	return nil, fmt.Errorf("%s label not present on %s: %s/%s", capi.ClusterNameLabel, obj.GetObjectKind().GroupVersionKind().Kind, data.String("metadata", "namespace"), data.String("metadata", "name"))
 }
 
 // GetOwnerCAPICluster takes an obj and will attempt to find the capi cluster owner reference.

@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	rkev1 "github.com/rancher/rancher/pkg/apis/rke.cattle.io/v1"
 	"github.com/rancher/rancher/pkg/apis/rke.cattle.io/v1/plan"
@@ -74,7 +75,7 @@ func (p *PlanStore) Load(cluster *capi.Cluster, rkeControlPlane *rkev1.RKEContro
 	var anyPlanDelivered bool
 
 	machines, err := p.machineCache.List(cluster.Namespace, labels.SelectorFromSet(map[string]string{
-		capi.ClusterLabelName: cluster.Name,
+		capi.ClusterNameLabel: cluster.Name,
 	}))
 	if err != nil {
 		return nil, anyPlanDelivered, err
@@ -187,6 +188,10 @@ func SecretToNode(secret *corev1.Secret) (*plan.Node, error) {
 	probes := secret.Data["probe-statuses"]
 	failureCount := secret.Data["failure-count"]
 
+	if probesPassed, ok := secret.Annotations[capr.PlanProbesPassedAnnotation]; ok && probesPassed != "" {
+		result.ProbesUsable = true
+	}
+
 	if len(failureCount) > 0 && PlanHash(planData) == failedChecksum {
 		failureCount, err := strconv.Atoi(string(failureCount))
 		if err != nil {
@@ -211,15 +216,12 @@ func SecretToNode(secret *corev1.Secret) (*plan.Node, error) {
 	}
 
 	if len(probes) > 0 {
-		result.ProbeStatus = map[string]plan.ProbeStatus{}
-		if err := json.Unmarshal(probes, &result.ProbeStatus); err != nil {
+		probeStatuses, healthy, err := ParseProbeStatuses(probes)
+		if err != nil {
 			return nil, err
 		}
-		for _, status := range result.ProbeStatus {
-			if !status.Healthy {
-				result.Healthy = false
-			}
-		}
+		result.ProbeStatus = *probeStatuses
+		result.Healthy = healthy
 	}
 
 	if len(planData) > 0 {
@@ -292,8 +294,25 @@ func SecretToNode(secret *corev1.Secret) (*plan.Node, error) {
 		}
 	}
 
-	result.InSync = result.Healthy && bytes.Equal(planData, appliedPlanData)
+	result.InSync = bytes.Equal(planData, appliedPlanData)
 	return result, nil
+}
+
+func ParseProbeStatuses(probeStatuses []byte) (*map[string]plan.ProbeStatus, bool, error) {
+	healthy := true
+	if len(probeStatuses) == 0 {
+		return nil, false, fmt.Errorf("probe status length was 0")
+	}
+	probeStatusMap := map[string]plan.ProbeStatus{}
+	if err := json.Unmarshal(probeStatuses, &probeStatusMap); err != nil {
+		return nil, false, err
+	}
+	for _, status := range probeStatusMap {
+		if !status.Healthy {
+			healthy = false
+		}
+	}
+	return &probeStatusMap, healthy, nil
 }
 
 func PlanHash(plan []byte) string {
@@ -393,6 +412,9 @@ func (p *PlanStore) UpdatePlan(entry *planEntry, newNodePlan plan.NodePlan, join
 		entry.Metadata.Annotations[capr.JoinedToAnnotation] = ""
 	}
 
+	entry.Metadata.Annotations[capr.PlanUpdatedTimeAnnotation] = time.Now().UTC().Format(time.RFC3339)
+	entry.Metadata.Annotations[capr.PlanProbesPassedAnnotation] = ""
+
 	capr.CopyPlanMetadataToSecret(secret, entry.Metadata)
 
 	// If the plan is being updated, then delete the probe-statuses so their healthy status will be reported as healthy only when they pass.
@@ -486,10 +508,13 @@ func assignAndCheckPlan(store *PlanStore, msg string, entry *planEntry, newPlan 
 	if !entry.Plan.InSync {
 		return errWaiting(fmt.Sprintf("waiting for %s", msg))
 	}
+	if !entry.Plan.Healthy {
+		return errWaiting(fmt.Sprintf("waiting for %s probes", msg))
+	}
 	return nil
 }
 
-func (p *PlanStore) setMachineJoinURL(entry *planEntry, capiCluster *capi.Cluster, rkeControlPlane *rkev1.RKEControlPlane) error {
+func (p *PlanStore) setMachineJoinURL(entry *planEntry, capiCluster *capi.Cluster, controlPlane *rkev1.RKEControlPlane) error {
 	var (
 		err     error
 		joinURL string
@@ -501,7 +526,7 @@ func (p *PlanStore) setMachineJoinURL(entry *planEntry, capiCluster *capi.Cluste
 	}
 
 	if IsEtcdOnlyInitNode(entry) {
-		joinURL, err = getJoinURLFromOutput(entry, capiCluster, rkeControlPlane)
+		joinURL, err = getJoinURLFromOutput(entry, capiCluster, controlPlane)
 		if err != nil || joinURL == "" {
 			return err
 		}
@@ -522,7 +547,7 @@ func (p *PlanStore) setMachineJoinURL(entry *planEntry, capiCluster *capi.Cluste
 			}
 		}
 
-		joinURL = joinURLFromAddress(address, capr.GetRuntimeSupervisorPort(rkeControlPlane.Spec.KubernetesVersion))
+		joinURL = joinURLFromAddress(address, capr.GetRuntimeSupervisorPort(controlPlane.Spec.KubernetesVersion))
 	}
 
 	if joinURL != "" && entry.Metadata.Annotations[capr.JoinURLAnnotation] != joinURL {

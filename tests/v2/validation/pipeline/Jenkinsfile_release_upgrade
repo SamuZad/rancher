@@ -27,15 +27,15 @@ node {
     def testResultsOut = "results.xml"
     def envFile = ".env"
     def rancherConfig = "rancher_env.config"
-    def branch = "release/v2.7"
+    def branch = "release/v2.8"
+    def defaultTag = "validation"
+
     if ("${env.BRANCH}" != "null" && "${env.BRANCH}" != "") {
       branch = "${env.BRANCH}"
     }
-    def repo = scm.userRemoteConfigs
-    def pointedRepo = "https://github.com/rancher/rancher.git"
+    def rancherRepo = scm.getUserRemoteConfigs()[0].getUrl()
     if ("${env.REPO}" != "null" && "${env.REPO}" != "") {
-      repo = [[url: "${env.REPO}"]]
-      pointedRepo = "${env.REPO}"
+      rancherRepo = "${env.REPO}"
     }
     def timeout = "60m"
     if ("${env.TIMEOUT}" != "null" && "${env.TIMEOUT}" != "") {
@@ -105,7 +105,7 @@ node {
                       $class: 'GitSCM',
                       branches: [[name: "*/${branch}"]],
                       extensions: scm.extensions + [[$class: 'CleanCheckout']],
-                      userRemoteConfigs: repo
+                      userRemoteConfigs: [[url: rancherRepo]]
                     ])
           }
           dir ("./") {
@@ -329,10 +329,11 @@ node {
                       def goValidationParams = [
                         string(name: 'TIMEOUT', value: "30m"),
                         text(name: 'CONFIG', value: configYaml),
-                        string(name: 'REPO', value: "${pointedRepo}"),
+                        string(name: 'REPO', value: "${rancherRepo}"),
                         string(name: 'BRANCH', value: "${branch}"),
                         string(name: 'TEST_PACKAGE', value: "${testPackage}"),
-                        string(name: 'GOTEST_TESTCASE', value: "${testCase}"),
+                        string(name: 'TAGS', value: "${defaultTag}"),
+                        string(name: 'GOTEST_TESTCASE', value: "${testCase}")
                       ]
 
                       jobs["$it-preupgrade"] = { build job: 'go-automation-freeform-job', parameters: goValidationParams }
@@ -380,9 +381,10 @@ node {
                       def goValidationParams = [
                         string(name: 'TIMEOUT', value: "30m"),
                         text(name: 'CONFIG', value: configYaml),
-                        string(name: 'REPO', value: "${pointedRepo}"),
+                        string(name: 'REPO', value: "${rancherRepo}"),
                         string(name: 'BRANCH', value: "${branch}"),
                         string(name: 'TEST_PACKAGE', value: "${testPackage}"),
+                        string(name: 'TAGS', value: "${defaultTag}"),
                         string(name: 'GOTEST_TESTCASE', value: "${testCase}")
                       ]
 
@@ -419,9 +421,10 @@ node {
                       def goValidationParams = [
                         string(name: 'TIMEOUT', value: "2h"),
                         text(name: 'CONFIG', value: configYaml),
-                        string(name: 'REPO', value: "${pointedRepo}"),
+                        string(name: 'REPO', value: "${rancherRepo}"),
                         string(name: 'BRANCH', value: "${branch}"),
                         string(name: 'TEST_PACKAGE', value: "${testPackage}"),
+                        string(name: 'TAGS', value: "${defaultTag}"),
                         string(name: 'GOTEST_TESTCASE', value: "${testCase}" )
                       ]
 
@@ -458,9 +461,10 @@ node {
                       def goValidationParams = [
                         string(name: 'TIMEOUT', value: "30m"),
                         text(name: 'CONFIG', value: configYaml),
-                        string(name: 'REPO', value: "${pointedRepo}"),
+                        string(name: 'REPO', value: "${rancherRepo}"),
                         string(name: 'BRANCH', value: "${branch}"),
                         string(name: 'TEST_PACKAGE', value: "${testPackage}"),
+                        string(name: 'TAGS', value: "${defaultTag}"),
                         string(name: 'GOTEST_TESTCASE', value: "${testCase}")
                       ]
 
@@ -481,7 +485,7 @@ node {
 
                   configFiles.each {
                     try{
-                      def configPath = "./${patchedConfigsDir}/$it"
+                      def configPath = "./${configsDir}/$it"
                       def configYaml = readFile(file: "${configPath}")
 
                       def testCase = sh (
@@ -497,9 +501,10 @@ node {
                       def goValidationParams = [
                         string(name: 'TIMEOUT', value: "1h"),
                         text(name: 'CONFIG', value: configYaml),
-                        string(name: 'REPO', value: "${pointedRepo}"),
+                        string(name: 'REPO', value: "${rancherRepo}"),
                         string(name: 'BRANCH', value: "${branch}"),
                         string(name: 'TEST_PACKAGE', value: "${testPackage}"),
+                        string(name: 'TAGS', value: "${defaultTag}"),
                         string(name: 'GOTEST_TESTCASE', value: "${testCase}")
                       ]
 

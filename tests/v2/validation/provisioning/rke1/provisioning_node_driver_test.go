@@ -1,3 +1,5 @@
+//go:build (validation || extended) && !infra.any && !infra.aks && !infra.eks && !infra.rke2k3s && !infra.gke && !infra.rke1 && !cluster.any && !cluster.custom && !cluster.nodedriver && !sanity && !stress
+
 package rke1
 
 import (
@@ -7,14 +9,14 @@ import (
 	management "github.com/rancher/rancher/tests/framework/clients/rancher/generated/management/v3"
 	"github.com/rancher/rancher/tests/framework/extensions/clusters"
 	"github.com/rancher/rancher/tests/framework/extensions/clusters/kubernetesversions"
-	nodepools "github.com/rancher/rancher/tests/framework/extensions/rke1/nodepools"
-	"github.com/rancher/rancher/tests/framework/extensions/rke1/nodetemplates"
+	"github.com/rancher/rancher/tests/framework/extensions/provisioninginput"
 	"github.com/rancher/rancher/tests/framework/extensions/users"
 	password "github.com/rancher/rancher/tests/framework/extensions/users/passwordgenerator"
 	"github.com/rancher/rancher/tests/framework/pkg/config"
+	"github.com/rancher/rancher/tests/framework/pkg/environmentflag"
 	namegen "github.com/rancher/rancher/tests/framework/pkg/namegenerator"
 	"github.com/rancher/rancher/tests/framework/pkg/session"
-	provisioning "github.com/rancher/rancher/tests/v2/validation/provisioning"
+	"github.com/rancher/rancher/tests/v2/validation/provisioning/permutations"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )
@@ -24,12 +26,7 @@ type RKE1NodeDriverProvisioningTestSuite struct {
 	client             *rancher.Client
 	standardUserClient *rancher.Client
 	session            *session.Session
-	cluster            *management.Cluster
-	kubernetesVersions []string
-	cnis               []string
-	providers          []string
-	psact              string
-	advancedOptions    provisioning.AdvancedOptions
+	provisioningConfig *provisioninginput.Config
 }
 
 func (r *RKE1NodeDriverProvisioningTestSuite) TearDownSuite() {
@@ -40,21 +37,16 @@ func (r *RKE1NodeDriverProvisioningTestSuite) SetupSuite() {
 	testSession := session.NewSession()
 	r.session = testSession
 
-	clustersConfig := new(provisioning.Config)
-	config.LoadConfig(provisioning.ConfigurationFileKey, clustersConfig)
-
-	r.kubernetesVersions = clustersConfig.RKE1KubernetesVersions
-	r.cnis = clustersConfig.CNIs
-	r.providers = clustersConfig.Providers
-	r.psact = clustersConfig.PSACT
-	r.advancedOptions = clustersConfig.AdvancedOptions
+	r.provisioningConfig = new(provisioninginput.Config)
+	config.LoadConfig(provisioninginput.ConfigurationFileKey, r.provisioningConfig)
 
 	client, err := rancher.NewClient("", testSession)
 	require.NoError(r.T(), err)
 
 	r.client = client
 
-	r.kubernetesVersions, err = kubernetesversions.Default(r.client, clusters.RKE1ClusterType.String(), r.kubernetesVersions)
+	r.provisioningConfig.RKE1KubernetesVersions, err = kubernetesversions.Default(
+		r.client, clusters.RKE1ClusterType.String(), r.provisioningConfig.RKE1KubernetesVersions)
 	require.NoError(r.T(), err)
 
 	enabled := true
@@ -79,168 +71,48 @@ func (r *RKE1NodeDriverProvisioningTestSuite) SetupSuite() {
 }
 
 func (r *RKE1NodeDriverProvisioningTestSuite) TestProvisioningRKE1Cluster() {
-	nodeRoles0 := []nodepools.NodeRoles{
-		{
-			ControlPlane: true,
-			Etcd:         true,
-			Worker:       true,
-			Quantity:     1,
-		},
-	}
-
-	nodeRoles1 := []nodepools.NodeRoles{
-		{
-			ControlPlane: true,
-			Etcd:         true,
-			Worker:       false,
-			Quantity:     1,
-		},
-		{
-			ControlPlane: false,
-			Etcd:         false,
-			Worker:       true,
-			Quantity:     1,
-		},
-	}
-
-	nodeRoles2 := []nodepools.NodeRoles{
-		{
-			ControlPlane: true,
-			Etcd:         false,
-			Worker:       false,
-			Quantity:     1,
-		},
-		{
-			ControlPlane: false,
-			Etcd:         true,
-			Worker:       false,
-			Quantity:     1,
-		},
-		{
-			ControlPlane: false,
-			Etcd:         false,
-			Worker:       true,
-			Quantity:     1,
-		},
-	}
-
+	nodeRolesAll := []provisioninginput.NodePools{provisioninginput.AllRolesNodePool}
+	nodeRolesShared := []provisioninginput.NodePools{provisioninginput.EtcdControlPlaneNodePool, provisioninginput.WorkerNodePool}
+	nodeRolesDedicated := []provisioninginput.NodePools{provisioninginput.EtcdNodePool, provisioninginput.ControlPlaneNodePool, provisioninginput.WorkerNodePool}
 	tests := []struct {
 		name      string
-		nodeRoles []nodepools.NodeRoles
+		nodePools []provisioninginput.NodePools
 		client    *rancher.Client
-		psact     string
+		runFlag   bool
 	}{
-		{"1 Node all roles " + provisioning.AdminClientName.String(), nodeRoles0, r.client, r.psact},
-		{"1 Node all roles " + provisioning.StandardClientName.String(), nodeRoles0, r.standardUserClient, r.psact},
-		{"2 nodes - etcd/cp roles per 1 node " + provisioning.AdminClientName.String(), nodeRoles1, r.client, r.psact},
-		{"2 nodes - etcd/cp roles per 1 node " + provisioning.StandardClientName.String(), nodeRoles1, r.standardUserClient, r.psact},
-		{"3 nodes - 1 role per node " + provisioning.AdminClientName.String(), nodeRoles2, r.client, r.psact},
-		{"3 nodes - 1 role per node " + provisioning.StandardClientName.String(), nodeRoles2, r.standardUserClient, r.psact},
+		{"1 Node all roles " + provisioninginput.AdminClientName.String(), nodeRolesAll, r.client, r.client.Flags.GetValue(environmentflag.Long)},
+		{"1 Node all roles " + provisioninginput.StandardClientName.String(), nodeRolesAll, r.standardUserClient, r.client.Flags.GetValue(environmentflag.Short) || r.client.Flags.GetValue(environmentflag.Long)},
+		{"2 nodes - etcd/cp roles per 1 node " + provisioninginput.AdminClientName.String(), nodeRolesShared, r.client, r.client.Flags.GetValue(environmentflag.Long)},
+		{"2 nodes - etcd/cp roles per 1 node " + provisioninginput.StandardClientName.String(), nodeRolesShared, r.standardUserClient, r.client.Flags.GetValue(environmentflag.Short) || r.client.Flags.GetValue(environmentflag.Long)},
+		{"3 nodes - 1 role per node " + provisioninginput.AdminClientName.String(), nodeRolesDedicated, r.client, r.client.Flags.GetValue(environmentflag.Long)},
+		{"3 nodes - 1 role per node " + provisioninginput.StandardClientName.String(), nodeRolesDedicated, r.standardUserClient, r.client.Flags.GetValue(environmentflag.Long)},
 	}
-
-	var name, scaleName string
 	for _, tt := range tests {
-		subSession := r.session.NewSession()
-		defer subSession.Cleanup()
-
-		client, err := tt.client.WithSession(subSession)
-		require.NoError(r.T(), err)
-
-		for _, providerName := range r.providers {
-			provider := CreateProvider(providerName)
-			providerName := " Node Provider: " + provider.Name
-			for _, kubeVersion := range r.kubernetesVersions {
-				name = tt.name + providerName.String() + " Kubernetes version: " + kubeVersion
-				for _, cni := range r.cnis {
-					nodeTemplate, err := provider.NodeTemplateFunc(client)
-					require.NoError(r.T(), err)
-
-					name += " cni: " + cni
-					scaleName = "scaling " + name
-					r.Run(name, func() {
-						cluster, err := TestProvisioningRKE1Cluster(r.T(), client, provider, tt.nodeRoles, tt.psact, kubeVersion, cni, nodeTemplate, r.advancedOptions)
-						require.NoError(r.T(), err)
-
-						r.cluster = cluster
-					})
-
-					r.Run(scaleName, func() {
-						r.testScalingRKE1NodePools(client, provider, tt.nodeRoles, tt.psact, kubeVersion, cni, r.cluster, nodeTemplate)
-					})
-
-					r.cluster = nil
-				}
-			}
+		if !tt.runFlag {
+			r.T().Logf("SKIPPED")
+			continue
 		}
+		provisioningConfig := *r.provisioningConfig
+		provisioningConfig.NodePools = tt.nodePools
+		permutations.RunTestPermutations(&r.Suite, tt.name, tt.client, &provisioningConfig, permutations.RKE1ProvisionCluster, nil, nil)
 	}
 }
 
 func (r *RKE1NodeDriverProvisioningTestSuite) TestProvisioningRKE1ClusterDynamicInput() {
-	clustersConfig := new(provisioning.Config)
-	config.LoadConfig(provisioning.ConfigurationFileKey, clustersConfig)
-	nodesAndRoles := clustersConfig.NodesAndRolesRKE1
 
-	if len(nodesAndRoles) == 0 {
+	if len(r.provisioningConfig.NodePools) == 0 {
 		r.T().Skip()
 	}
 
 	tests := []struct {
 		name   string
 		client *rancher.Client
-		psact  string
 	}{
-		{provisioning.AdminClientName.String(), r.client, r.psact},
-		{provisioning.StandardClientName.String(), r.standardUserClient, r.psact},
+		{provisioninginput.AdminClientName.String(), r.client},
+		{provisioninginput.StandardClientName.String(), r.standardUserClient},
 	}
-
-	var name, scaleName string
 	for _, tt := range tests {
-		subSession := r.session.NewSession()
-		defer subSession.Cleanup()
-
-		client, err := tt.client.WithSession(subSession)
-		require.NoError(r.T(), err)
-
-		for _, providerName := range r.providers {
-			provider := CreateProvider(providerName)
-			providerName := " Node Provider: " + provider.Name.String()
-			for _, kubeVersion := range r.kubernetesVersions {
-				name = tt.name + providerName + " Kubernetes version: " + kubeVersion
-				for _, cni := range r.cnis {
-					nodeTemplate, err := provider.NodeTemplateFunc(client)
-					require.NoError(r.T(), err)
-
-					name += " cni: " + cni
-					scaleName = "scaling " + name
-					r.Run(name, func() {
-						cluster, err := TestProvisioningRKE1Cluster(r.T(), client, provider, nodesAndRoles, tt.psact, kubeVersion, cni, nodeTemplate, r.advancedOptions)
-						require.NoError(r.T(), err)
-
-						r.cluster = cluster
-					})
-
-					r.Run(scaleName, func() {
-						r.testScalingRKE1NodePools(client, provider, nodesAndRoles, tt.psact, kubeVersion, cni, r.cluster, nodeTemplate)
-					})
-
-					r.cluster = nil
-				}
-			}
-		}
-	}
-}
-
-func (r *RKE1NodeDriverProvisioningTestSuite) testScalingRKE1NodePools(client *rancher.Client, provider Provider, nodesAndRoles []nodepools.NodeRoles, psact string, kubeVersion, cni string, cluster *management.Cluster, nodeTemplate *nodetemplates.NodeTemplate) {
-	if cluster == nil {
-		cluster, err := TestProvisioningRKE1Cluster(r.T(), client, provider, nodesAndRoles, psact, kubeVersion, cni, nodeTemplate, r.advancedOptions)
-		require.NoError(r.T(), err)
-
-		err = nodepools.ScaleWorkerNodePool(client, nodesAndRoles, cluster.ID, nodeTemplate.ID)
-		require.NoError(r.T(), err)
-
-	} else {
-		err := nodepools.ScaleWorkerNodePool(client, nodesAndRoles, cluster.ID, nodeTemplate.ID)
-		require.NoError(r.T(), err)
+		permutations.RunTestPermutations(&r.Suite, tt.name, tt.client, r.provisioningConfig, permutations.RKE1ProvisionCluster, nil, nil)
 	}
 }
 

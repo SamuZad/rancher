@@ -1,3 +1,5 @@
+//go:build (validation || sanity) && !infra.any && !infra.aks && !infra.eks && !infra.rke2k3s && !infra.gke && !infra.rke1 && !cluster.any && !cluster.custom && !cluster.nodedriver && !extended && !stress
+
 package k3s
 
 import (
@@ -7,13 +9,14 @@ import (
 	management "github.com/rancher/rancher/tests/framework/clients/rancher/generated/management/v3"
 	"github.com/rancher/rancher/tests/framework/extensions/clusters"
 	"github.com/rancher/rancher/tests/framework/extensions/clusters/kubernetesversions"
-	"github.com/rancher/rancher/tests/framework/extensions/machinepools"
+	"github.com/rancher/rancher/tests/framework/extensions/provisioninginput"
 	"github.com/rancher/rancher/tests/framework/extensions/users"
 	password "github.com/rancher/rancher/tests/framework/extensions/users/passwordgenerator"
 	"github.com/rancher/rancher/tests/framework/pkg/config"
+	"github.com/rancher/rancher/tests/framework/pkg/environmentflag"
 	namegen "github.com/rancher/rancher/tests/framework/pkg/namegenerator"
 	"github.com/rancher/rancher/tests/framework/pkg/session"
-	provisioning "github.com/rancher/rancher/tests/v2/validation/provisioning"
+	"github.com/rancher/rancher/tests/v2/validation/provisioning/permutations"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )
@@ -23,11 +26,7 @@ type CustomClusterProvisioningTestSuite struct {
 	client             *rancher.Client
 	session            *session.Session
 	standardUserClient *rancher.Client
-	kubernetesVersions []string
-	nodeProviders      []string
-	psact              string
-	hardened           bool
-	advancedOptions    provisioning.AdvancedOptions
+	provisioningConfig *provisioninginput.Config
 }
 
 func (c *CustomClusterProvisioningTestSuite) TearDownSuite() {
@@ -38,21 +37,15 @@ func (c *CustomClusterProvisioningTestSuite) SetupSuite() {
 	testSession := session.NewSession()
 	c.session = testSession
 
-	clustersConfig := new(provisioning.Config)
-	config.LoadConfig(provisioning.ConfigurationFileKey, clustersConfig)
-
-	c.kubernetesVersions = clustersConfig.K3SKubernetesVersions
-	c.nodeProviders = clustersConfig.NodeProviders
-	c.psact = clustersConfig.PSACT
-	c.hardened = clustersConfig.Hardened
-	c.advancedOptions = clustersConfig.AdvancedOptions
+	c.provisioningConfig = new(provisioninginput.Config)
+	config.LoadConfig(provisioninginput.ConfigurationFileKey, c.provisioningConfig)
 
 	client, err := rancher.NewClient("", testSession)
 	require.NoError(c.T(), err)
 
 	c.client = client
 
-	c.kubernetesVersions, err = kubernetesversions.Default(c.client, clusters.K3SClusterType.String(), c.kubernetesVersions)
+	c.provisioningConfig.K3SKubernetesVersions, err = kubernetesversions.Default(c.client, clusters.K3SClusterType.String(), c.provisioningConfig.K3SKubernetesVersions)
 	require.NoError(c.T(), err)
 
 	enabled := true
@@ -77,79 +70,57 @@ func (c *CustomClusterProvisioningTestSuite) SetupSuite() {
 }
 
 func (c *CustomClusterProvisioningTestSuite) TestProvisioningK3SCustomCluster() {
-	nodeRolesAll := []machinepools.NodeRoles{provisioning.AllRolesPool}
-	nodeRolesShared := []machinepools.NodeRoles{provisioning.EtcdControlPlanePool, provisioning.WorkerPool}
-	nodeRolesDedicated := []machinepools.NodeRoles{provisioning.EtcdPool, provisioning.ControlPlanePool, provisioning.WorkerPool}
+	nodeRolesAll := []provisioninginput.MachinePools{provisioninginput.AllRolesMachinePool}
+	nodeRolesShared := []provisioninginput.MachinePools{provisioninginput.EtcdControlPlaneMachinePool, provisioninginput.WorkerMachinePool}
+	nodeRolesDedicated := []provisioninginput.MachinePools{provisioninginput.EtcdMachinePool, provisioninginput.ControlPlaneMachinePool, provisioninginput.WorkerMachinePool}
 
 	tests := []struct {
-		name      string
-		client    *rancher.Client
-		nodeRoles []machinepools.NodeRoles
-		psact     string
+		name         string
+		client       *rancher.Client
+		machinePools []provisioninginput.MachinePools
+		runFlag      bool
 	}{
-		{"1 Node all roles " + provisioning.AdminClientName.String(), c.client, nodeRolesAll, c.psact},
-		{"1 Node all roles " + provisioning.StandardClientName.String(), c.standardUserClient, nodeRolesAll, c.psact},
-		{"2 nodes - etcd/cp roles per 1 node " + provisioning.AdminClientName.String(), c.client, nodeRolesShared, c.psact},
-		{"2 nodes - etcd/cp roles per 1 node " + provisioning.StandardClientName.String(), c.standardUserClient, nodeRolesShared, c.psact},
-		{"3 nodes - 1 role per node " + provisioning.AdminClientName.String(), c.client, nodeRolesDedicated, c.psact},
-		{"3 nodes - 1 role per node " + provisioning.StandardClientName.String(), c.standardUserClient, nodeRolesDedicated, c.psact},
+		{"1 Node all roles " + provisioninginput.AdminClientName.String(), c.client, nodeRolesAll, c.client.Flags.GetValue(environmentflag.Long)},
+		{"1 Node all roles " + provisioninginput.StandardClientName.String(), c.standardUserClient, nodeRolesAll, c.client.Flags.GetValue(environmentflag.Short) || c.client.Flags.GetValue(environmentflag.Long)},
+		{"2 nodes - etcd/cp roles per 1 node " + provisioninginput.AdminClientName.String(), c.client, nodeRolesShared, c.client.Flags.GetValue(environmentflag.Long)},
+		{"2 nodes - etcd/cp roles per 1 node " + provisioninginput.StandardClientName.String(), c.standardUserClient, nodeRolesShared, c.client.Flags.GetValue(environmentflag.Short) || c.client.Flags.GetValue(environmentflag.Long)},
+		{"3 nodes - 1 role per node " + provisioninginput.AdminClientName.String(), c.client, nodeRolesDedicated, c.client.Flags.GetValue(environmentflag.Long)},
+		{"3 nodes - 1 role per node " + provisioninginput.StandardClientName.String(), c.standardUserClient, nodeRolesDedicated, c.client.Flags.GetValue(environmentflag.Long)},
 	}
-	var name string
 	for _, tt := range tests {
-		testSession := session.NewSession()
-		defer testSession.Cleanup()
-
-		client, err := tt.client.WithSession(testSession)
-		require.NoError(c.T(), err)
-
-		for _, nodeProviderName := range c.nodeProviders {
-			externalNodeProvider := provisioning.ExternalNodeProviderSetup(nodeProviderName)
-			providerName := " Node Provider: " + nodeProviderName
-			for _, kubeVersion := range c.kubernetesVersions {
-				name = tt.name + providerName + " Kubernetes version: " + kubeVersion
-				c.Run(name, func() {
-					TestProvisioningK3SCustomCluster(c.T(), client, externalNodeProvider, tt.nodeRoles, kubeVersion, c.hardened, tt.psact, c.advancedOptions)
-				})
-			}
+		if !tt.runFlag {
+			c.T().Logf("SKIPPED")
+			continue
 		}
+
+		provisioningConfig := *c.provisioningConfig
+		provisioningConfig.MachinePools = tt.machinePools
+		permutations.RunTestPermutations(&c.Suite, tt.name, tt.client, &provisioningConfig, permutations.K3SCustomCluster, nil, nil)
 	}
 }
 
 func (c *CustomClusterProvisioningTestSuite) TestProvisioningK3SCustomClusterDynamicInput() {
-	clustersConfig := new(provisioning.Config)
-	config.LoadConfig(provisioning.ConfigurationFileKey, clustersConfig)
-	nodesAndRoles := clustersConfig.NodesAndRoles
-
-	if len(nodesAndRoles) == 0 {
+	isWindows := false
+	for _, pool := range c.provisioningConfig.MachinePools {
+		if pool.NodeRoles.Windows {
+			isWindows = true
+			break
+		}
+	}
+	require.False(c.T(), isWindows, "Windows nodes are not supported for k3s Clusters")
+	if len(c.provisioningConfig.MachinePools) == 0 {
 		c.T().Skip()
 	}
 
 	tests := []struct {
 		name   string
 		client *rancher.Client
-		psact  string
 	}{
-		{provisioning.AdminClientName.String(), c.client, c.psact},
-		{provisioning.StandardClientName.String(), c.standardUserClient, c.psact},
+		{provisioninginput.AdminClientName.String(), c.client},
+		{provisioninginput.StandardClientName.String(), c.standardUserClient},
 	}
-	var name string
 	for _, tt := range tests {
-		testSession := session.NewSession()
-		defer testSession.Cleanup()
-
-		client, err := tt.client.WithSession(testSession)
-		require.NoError(c.T(), err)
-
-		for _, nodeProviderName := range c.nodeProviders {
-			externalNodeProvider := provisioning.ExternalNodeProviderSetup(nodeProviderName)
-			providerName := " Node Provider: " + nodeProviderName
-			for _, kubeVersion := range c.kubernetesVersions {
-				name = tt.name + providerName + " Kubernetes version: " + kubeVersion
-				c.Run(name, func() {
-					TestProvisioningK3SCustomCluster(c.T(), client, externalNodeProvider, nodesAndRoles, kubeVersion, c.hardened, tt.psact, c.advancedOptions)
-				})
-			}
-		}
+		permutations.RunTestPermutations(&c.Suite, tt.name, tt.client, c.provisioningConfig, permutations.K3SCustomCluster, nil, nil)
 	}
 }
 

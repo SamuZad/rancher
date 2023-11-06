@@ -1,3 +1,5 @@
+//go:build (validation || infra.rke1 || cluster.any || stress) && !infra.any && !infra.aks && !infra.eks && !infra.gke && !infra.rke2k3s && !sanity && !extended
+
 package charts
 
 import (
@@ -13,6 +15,7 @@ import (
 	v1 "github.com/rancher/rancher/tests/framework/clients/rancher/v1"
 	"github.com/rancher/rancher/tests/framework/extensions/charts"
 	"github.com/rancher/rancher/tests/framework/extensions/clusters"
+	"github.com/rancher/rancher/tests/framework/extensions/ingresses"
 	"github.com/rancher/rancher/tests/framework/extensions/namespaces"
 	"github.com/rancher/rancher/tests/framework/extensions/projects"
 	"github.com/rancher/rancher/tests/framework/extensions/secrets"
@@ -129,9 +132,9 @@ func (m *MonitoringTestSuite) TestMonitoringChart() {
 	paths := []string{alertManagerPath, grafanaPath, prometheusGraphPath, prometheusRulesPath, prometheusTargetsPath}
 	for _, path := range paths {
 		m.T().Logf("Validating %s is accessible", path)
-		result, err := charts.GetChartCaseEndpoint(client, client.RancherConfig.Host, path, true)
+		result, err := ingresses.IsIngressExternallyAccessible(client, client.RancherConfig.Host, path, true)
 		assert.NoError(m.T(), err)
-		assert.True(m.T(), result.Ok)
+		assert.True(m.T(), result)
 	}
 
 	m.T().Log("Validating all Prometheus active targets are up")
@@ -197,7 +200,7 @@ func (m *MonitoringTestSuite) TestMonitoringChart() {
 	require.NoError(m.T(), err)
 
 	m.T().Logf("Getting alert manager secret to edit receiver")
-	alertManagerSecretResp, err := steveclient.SteveType(secrets.SecretSteveType).ByID(alertManagerSecretId)
+	alertManagerSecretResp, err := steveclient.SteveType(secrets.SecretSteveType).ByID(alertManagerSecretID)
 	require.NoError(m.T(), err)
 
 	alertManagerSecret := &corev1.Secret{}
@@ -205,7 +208,7 @@ func (m *MonitoringTestSuite) TestMonitoringChart() {
 	require.NoError(m.T(), err)
 
 	m.T().Logf("Editing alert manager secret receivers")
-	encodedAlertConfigWithReceiver, err := editAlertReceiver(alertManagerSecret.Data[secretPath], hostWithProtocol, urlOfHost)
+	encodedAlertConfigWithReceiver, err := editAlertReceiver(alertManagerSecret.Data[secretPath], urlOfHost)
 	require.NoError(m.T(), err)
 
 	alertManagerSecret.Data[secretPath] = encodedAlertConfigWithReceiver
@@ -219,14 +222,14 @@ func (m *MonitoringTestSuite) TestMonitoringChart() {
 	require.NoError(m.T(), err)
 
 	m.T().Logf("Getting alert manager secret to edit routes")
-	alertManagerSecretResp, err = steveclient.SteveType(secrets.SecretSteveType).ByID(alertManagerSecretId)
+	alertManagerSecretResp, err = steveclient.SteveType(secrets.SecretSteveType).ByID(alertManagerSecretID)
 	require.NoError(m.T(), err)
 
 	err = v1.ConvertToK8sType(alertManagerSecretResp.JSONResp, alertManagerSecret)
 	require.NoError(m.T(), err)
 
 	m.T().Logf("Editing alert manager secret routes")
-	encodedAlertConfigWithRoute, err := editAlertRoute(alertManagerSecret.Data[secretPath], hostWithProtocol, urlOfHost)
+	encodedAlertConfigWithRoute, err := editAlertRoute(alertManagerSecret.Data[secretPath])
 	require.NoError(m.T(), err)
 
 	alertManagerSecret.Data[secretPath] = encodedAlertConfigWithRoute
@@ -237,9 +240,9 @@ func (m *MonitoringTestSuite) TestMonitoringChart() {
 
 	m.T().Logf("Validating traefik is accessible externally")
 	host := fmt.Sprintf("%v:%v", randWorkerNodePublicIP, webhookReceiverServiceSpec.Ports[0].NodePort)
-	result, err := charts.GetChartCaseEndpoint(client, host, "dashboard", false)
+	result, err := ingresses.IsIngressExternallyAccessible(client, host, "dashboard", false)
 	assert.NoError(m.T(), err)
-	assert.True(m.T(), result.Ok)
+	assert.True(m.T(), result)
 
 	m.T().Logf("Validating alertmanager sent alert to webhook receiver")
 	err = charts.WatchAndWaitDeploymentForAnnotation(client, m.project.ClusterID, webhookReceiverNamespace.Name, alertWebhookReceiverDeploymentResp.Name, webhookReceiverAnnotationKey, webhookReceiverAnnotationValue)

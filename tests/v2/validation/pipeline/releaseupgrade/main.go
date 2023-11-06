@@ -6,9 +6,9 @@ import (
 
 	"github.com/rancher/rancher/tests/framework/clients/rancher"
 	"github.com/rancher/rancher/tests/framework/extensions/pipeline"
+	"github.com/rancher/rancher/tests/framework/extensions/provisioninginput"
 	"github.com/rancher/rancher/tests/framework/pkg/config"
 	"github.com/rancher/rancher/tests/framework/pkg/environmentflag"
-	"github.com/rancher/rancher/tests/v2/validation/provisioning"
 	"github.com/rancher/rancher/tests/v2/validation/upgrade"
 	"github.com/sirupsen/logrus"
 )
@@ -35,10 +35,6 @@ const (
 )
 
 func main() {
-	if configPath == "" || adminToken == "" {
-		logrus.Fatalf("error file in config path or token doesn't exist")
-	}
-
 	os.Setenv(configEnvironmentKey, configPath)
 	defer os.Unsetenv(configEnvironmentKey)
 
@@ -48,30 +44,32 @@ func main() {
 	rancherConfig := new(rancher.Config)
 	config.LoadConfig(rancher.ConfigurationFileKey, rancherConfig)
 
-	rancherConfig.Host = haConfig.Host
-	rancherConfig.AdminToken = adminToken
+	if haConfig.Host != "" {
+		rancherConfig.Host = haConfig.Host
+		rancherConfig.AdminToken = adminToken
 
-	//Rancher cleanup has to be false for the future steps to prevent resource deletion
-	rancherCleanup := false
-	rancherConfig.Cleanup = &rancherCleanup
+		//Rancher cleanup has to be false for the future steps to prevent resource deletion
+		rancherCleanup := false
+		rancherConfig.Cleanup = &rancherCleanup
 
-	//HA cleanup default to true if not specified
-	if haConfig.Cleanup == nil {
-		HACleanup := true
-		haConfig.Cleanup = &HACleanup
+		//HA cleanup default to true if not specified
+		if haConfig.Cleanup == nil {
+			HACleanup := true
+			haConfig.Cleanup = &HACleanup
+		}
+
+		//Rancher insecure default to true if not specified
+		if haConfig.Insecure == nil {
+			insecure := true
+			rancherConfig.Insecure = &insecure
+			haConfig.Insecure = &insecure
+		} else {
+			rancherConfig.Insecure = haConfig.Insecure
+		}
+
+		config.UpdateConfig(rancher.ConfigurationFileKey, rancherConfig)
+		config.UpdateConfig(pipeline.HAConfigKey, haConfig)
 	}
-
-	//Rancher insecure default to true if not specified
-	if haConfig.Insecure == nil {
-		insecure := true
-		rancherConfig.Insecure = &insecure
-		haConfig.Insecure = &insecure
-	} else {
-		rancherConfig.Insecure = haConfig.Insecure
-	}
-
-	config.UpdateConfig(rancher.ConfigurationFileKey, rancherConfig)
-	config.UpdateConfig(pipeline.HAConfigKey, haConfig)
 
 	testCases := new(pipeline.TestCases)
 	config.LoadAndUpdateConfig(pipeline.TestCasesConfigKey, testCases, func() {
@@ -86,20 +84,20 @@ func main() {
 	config.LoadConfig(environmentflag.ConfigurationFileKey, environmentFlags)
 
 	//Overwrite/update flag to grab cluster names that are provisioned
-	environmentFlags.DesiredFlags = environmentflag.UpdateClusterName.String()
+	environmentFlags.DesiredFlags += "|" + environmentflag.UpdateClusterName.String()
 
 	config.UpdateConfig(environmentflag.ConfigurationFileKey, environmentFlags)
 
 	//make cattle-configs dir
 	err := config.NewConfigurationsDir(dirName)
 	if err != nil {
-		logrus.Fatalf("error while creating configs dir", err)
+		logrus.Fatal("error while creating configs dir", err)
 	}
 
 	//copy common configuration for individual configs
 	copiedConfig, err := os.ReadFile(configPath)
 	if err != nil {
-		logrus.Fatalf("error while copying upgrade config", err)
+		logrus.Fatal("error while copying upgrade config", err)
 	}
 
 	clusters := new(pipeline.Clusters)
@@ -114,9 +112,9 @@ func main() {
 			testPackage := "provisioning/rke1"
 			runCommand := pipeline.WrapWithAdminRunCommand("TestCustomClusterRKE1ProvisioningTestSuite/TestProvisioningRKE1CustomClusterDynamicInput")
 			newConfigName := config.NewConfigFileName(dirName, rke1FileName, customFileName, v.Provider, cni, fmt.Sprint(i))
-			err := NewRancherClusterConfiguration(v, newConfigName, isCustom, isRKE1, isRKE2, copiedConfig, cni, testPackage, runCommand)
+			err := NewRancherClusterConfiguration(v, newConfigName, isCustom, isRKE1, isRKE2, copiedConfig, cni, testPackage, runCommand, v.Tags, v.RunFlag)
 			if err != nil {
-				logrus.Infof("error while generating a rancher cluster config", err)
+				logrus.Info("error while generating a rancher cluster config", err)
 				continue
 			}
 		}
@@ -131,9 +129,9 @@ func main() {
 			testPackage := "provisioning/rke1"
 			runCommand := pipeline.WrapWithAdminRunCommand("TestRKE1ProvisioningTestSuite/TestProvisioningRKE1ClusterDynamicInput")
 			newConfigName := config.NewConfigFileName(dirName, rke1FileName, nodeProviderFileName, v.Provider, cni, fmt.Sprint(i))
-			err := NewRancherClusterConfiguration(v, newConfigName, isCustom, isRKE1, isRKE2, copiedConfig, cni, testPackage, runCommand)
+			err := NewRancherClusterConfiguration(v, newConfigName, isCustom, isRKE1, isRKE2, copiedConfig, cni, testPackage, runCommand, v.Tags, v.RunFlag)
 			if err != nil {
-				logrus.Infof("error while generating a rancher cluster config", err)
+				logrus.Info("error while generating a rancher cluster config", err)
 				continue
 			}
 		}
@@ -148,9 +146,9 @@ func main() {
 			testPackage := "provisioning/rke2"
 			runCommand := pipeline.WrapWithAdminRunCommand("TestCustomClusterRKE2ProvisioningTestSuite/TestProvisioningRKE2CustomClusterDynamicInput")
 			newConfigName := config.NewConfigFileName(dirName, rke2FileName, customFileName, v.Provider, cni, fmt.Sprint(i))
-			err := NewRancherClusterConfiguration(v, newConfigName, isCustom, isRKE1, isRKE2, copiedConfig, cni, testPackage, runCommand)
+			err := NewRancherClusterConfiguration(v, newConfigName, isCustom, isRKE1, isRKE2, copiedConfig, cni, testPackage, runCommand, v.Tags, v.RunFlag)
 			if err != nil {
-				logrus.Infof("error while generating a rancher cluster config", err)
+				logrus.Info("error while generating a rancher cluster config", err)
 				continue
 			}
 		}
@@ -165,9 +163,9 @@ func main() {
 			testPackage := "provisioning/rke2"
 			runCommand := pipeline.WrapWithAdminRunCommand("TestRKE2ProvisioningTestSuite/TestProvisioningRKE2ClusterDynamicInput")
 			newConfigName := config.NewConfigFileName(dirName, rke2FileName, nodeProviderFileName, v.Provider, cni, fmt.Sprint(i))
-			err := NewRancherClusterConfiguration(v, newConfigName, isCustom, isRKE1, isRKE2, copiedConfig, cni, testPackage, runCommand)
+			err := NewRancherClusterConfiguration(v, newConfigName, isCustom, isRKE1, isRKE2, copiedConfig, cni, testPackage, runCommand, v.Tags, v.RunFlag)
 			if err != nil {
-				logrus.Infof("error while generating a rancher cluster config", err)
+				logrus.Info("error while generating a rancher cluster config", err)
 				continue
 			}
 		}
@@ -182,9 +180,9 @@ func main() {
 			testPackage := "provisioning/k3s"
 			runCommand := pipeline.WrapWithAdminRunCommand("TestCustomClusterK3SProvisioningTestSuite/TestProvisioningK3SCustomClusterDynamicInput")
 			newConfigName := config.NewConfigFileName(dirName, k3sFileName, customFileName, v.Provider, cni, fmt.Sprint(i))
-			err := NewRancherClusterConfiguration(v, newConfigName, isCustom, isRKE1, isRKE2, copiedConfig, cni, testPackage, runCommand)
+			err := NewRancherClusterConfiguration(v, newConfigName, isCustom, isRKE1, isRKE2, copiedConfig, cni, testPackage, runCommand, v.Tags, v.RunFlag)
 			if err != nil {
-				logrus.Infof("error while generating a rancher cluster config", err)
+				logrus.Info("error while generating a rancher cluster config", err)
 				continue
 			}
 		}
@@ -199,23 +197,23 @@ func main() {
 			testPackage := "provisioning/k3s"
 			runCommand := pipeline.WrapWithAdminRunCommand("TestK3SProvisioningTestSuite/TestProvisioningK3SClusterDynamicInput")
 			newConfigName := config.NewConfigFileName(dirName, k3sFileName, nodeProviderFileName, v.Provider, cni, fmt.Sprint(i))
-			err := NewRancherClusterConfiguration(v, newConfigName, isCustom, isRKE1, isRKE2, copiedConfig, cni, testPackage, runCommand)
+			err := NewRancherClusterConfiguration(v, newConfigName, isCustom, isRKE1, isRKE2, copiedConfig, cni, testPackage, runCommand, v.Tags, v.RunFlag)
 			if err != nil {
-				logrus.Infof("error while generating a rancher cluster config", err)
+				logrus.Info("error while generating a rancher cluster config", err)
 				continue
 			}
 		}
 	}
 
 	for i, v := range clusters.HostedClusters {
-		var newConfigName config.ConfigFileName
+		var newConfigName config.FileName
 
 		switch v.Provider {
-		case provisioning.AWSProviderName.String():
+		case provisioninginput.AWSProviderName.String():
 			newConfigName = config.NewConfigFileName(dirName, v.Provider, eksFileName, fmt.Sprint(i))
-		case provisioning.AzureProviderName.String():
+		case provisioninginput.AzureProviderName.String():
 			newConfigName = config.NewConfigFileName(dirName, v.Provider, aksFileName, fmt.Sprint(i))
-		case provisioning.GoogleProviderName.String():
+		case provisioninginput.GoogleProviderName.String():
 			newConfigName = config.NewConfigFileName(dirName, v.Provider, gkeFileName, fmt.Sprint(i))
 		default:
 			continue
@@ -230,19 +228,19 @@ func main() {
 		hostedTestPackage := "provisioning/hosted/"
 
 		switch v.Provider {
-		case provisioning.AWSProviderName.String():
+		case provisioninginput.AWSProviderName.String():
 			config.LoadAndUpdateConfig(pipeline.TestCasesConfigKey, testCases, func() {
 				testCases.ProvisioningTestPackage = hostedTestPackage + "eks"
 				runCommand := "TestHostedEKSClusterProvisioningTestSuite/TestProvisioningHostedEKS"
 				testCases.ProvisioningTestCase = pipeline.WrapWithAdminRunCommand(runCommand)
 			})
-		case provisioning.AzureProviderName.String():
+		case provisioninginput.AzureProviderName.String():
 			config.LoadAndUpdateConfig(pipeline.TestCasesConfigKey, testCases, func() {
 				testCases.ProvisioningTestPackage = hostedTestPackage + "aks"
 				runCommand := "TestHostedAKSClusterProvisioningTestSuite/TestProvisioningHostedAKS"
 				testCases.ProvisioningTestCase = pipeline.WrapWithAdminRunCommand(runCommand)
 			})
-		case provisioning.GoogleProviderName.String():
+		case provisioninginput.GoogleProviderName.String():
 			config.LoadAndUpdateConfig(pipeline.TestCasesConfigKey, testCases, func() {
 				testCases.ProvisioningTestPackage = hostedTestPackage + "gke"
 				runCommand := "TestHostedGKEClusterProvisioningTestSuite/TestProvisioningHostedGKE"
@@ -265,21 +263,21 @@ func main() {
 	}
 }
 
-func NewRancherClusterConfiguration(cluster pipeline.RancherCluster, newConfigName config.ConfigFileName, isCustom, isRKE1, isRKE2 bool, copiedConfig []byte, cni, provTestPackage, runCommand string) (err error) {
+func NewRancherClusterConfiguration(cluster pipeline.RancherCluster, newConfigName config.FileName, isCustom, isRKE1, isRKE2 bool, copiedConfig []byte, cni, provTestPackage, runCommand, tags, runFlag string) (err error) {
 	err = newConfigName.NewFile(copiedConfig)
 	if err != nil {
-		logrus.Infof("error while writing populated config", err)
+		logrus.Info("error while writing populated config", err)
 		return err
 	}
 
 	err = newConfigName.SetEnvironmentKey()
 	if err != nil {
-		logrus.Infof("error while setting new config as env var", err)
+		logrus.Info("error while setting new config as env var", err)
 		return err
 	}
 
-	provisioningConfig := new(provisioning.Config)
-	config.LoadAndUpdateConfig(provisioning.ConfigurationFileKey, provisioningConfig, func() {
+	provisioningConfig := new(provisioninginput.Config)
+	config.LoadAndUpdateConfig(provisioninginput.ConfigurationFileKey, provisioningConfig, func() {
 		provisioningConfig.CNIs = []string{cni}
 		if isRKE1 {
 			provisioningConfig.RKE1KubernetesVersions = []string{cluster.KubernetesVersion}
@@ -294,6 +292,7 @@ func NewRancherClusterConfiguration(cluster pipeline.RancherCluster, newConfigNa
 	config.LoadAndUpdateConfig(pipeline.TestCasesConfigKey, testCases, func() {
 		testCases.ProvisioningTestPackage = provTestPackage
 		testCases.ProvisioningTestCase = runCommand
+		testCases.Tags = tags
 	})
 
 	pipeline.UpdateRancherDownstreamClusterFields(&cluster, isCustom, isRKE1)

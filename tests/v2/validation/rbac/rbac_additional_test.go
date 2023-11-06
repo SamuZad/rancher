@@ -1,3 +1,5 @@
+//go:build (validation || infra.any || cluster.any || extended) && !sanity && !stress
+
 package rbac
 
 import (
@@ -9,10 +11,13 @@ import (
 	management "github.com/rancher/rancher/tests/framework/clients/rancher/generated/management/v3"
 	v1 "github.com/rancher/rancher/tests/framework/clients/rancher/v1"
 	"github.com/rancher/rancher/tests/framework/extensions/clusters"
+	"github.com/rancher/rancher/tests/framework/extensions/clusters/kubernetesversions"
 	"github.com/rancher/rancher/tests/framework/extensions/projects"
+	"github.com/rancher/rancher/tests/framework/extensions/provisioning"
+	"github.com/rancher/rancher/tests/framework/extensions/provisioninginput"
 	"github.com/rancher/rancher/tests/framework/extensions/users"
+	"github.com/rancher/rancher/tests/framework/pkg/config"
 	"github.com/rancher/rancher/tests/framework/pkg/session"
-	"github.com/rancher/rancher/tests/v2/validation/provisioning/rke1"
 	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -26,7 +31,6 @@ type RBACAdditionalTestSuite struct {
 	standardUserClient    *rancher.Client
 	session               *session.Session
 	cluster               *management.Cluster
-	adminProject          *management.Project
 	steveAdminClient      *v1.Client
 	steveStdUserclient    *v1.Client
 	additionalUser        *management.User
@@ -54,7 +58,6 @@ func (rb *RBACAdditionalTestSuite) SetupSuite() {
 	require.NoError(rb.T(), err, "Error getting cluster ID")
 	rb.cluster, err = rb.client.Management.Cluster.ByID(clusterID)
 	require.NoError(rb.T(), err)
-
 }
 
 func (rb *RBACAdditionalTestSuite) ValidateAddStdUserAsProjectOwner() {
@@ -64,7 +67,7 @@ func (rb *RBACAdditionalTestSuite) ValidateAddStdUserAsProjectOwner() {
 	rb.standardUserCOProject = createProjectAsCO
 
 	log.Info("Validating if cluster owner can add a user as project owner in a project")
-	err = users.AddProjectMember(rb.standardUserClient, rb.standardUserCOProject, rb.additionalUser, roleProjectOwner)
+	err = users.AddProjectMember(rb.standardUserClient, rb.standardUserCOProject, rb.additionalUser, roleProjectOwner, nil)
 	require.NoError(rb.T(), err)
 	userGetProject, err := projects.GetProjectList(rb.additionalUserClient, rb.cluster.ID)
 	require.NoError(rb.T(), err)
@@ -73,13 +76,12 @@ func (rb *RBACAdditionalTestSuite) ValidateAddStdUserAsProjectOwner() {
 
 	err = users.RemoveProjectMember(rb.standardUserClient, rb.additionalUser)
 	require.NoError(rb.T(), err)
-
 }
 
 func (rb *RBACAdditionalTestSuite) ValidateAddMemberAsClusterRoles() {
 
 	log.Info("Validating if cluster owners should be able to add another standard user as a cluster owner")
-	errUserRole := users.AddClusterRoleToUser(rb.standardUserClient, rb.cluster, rb.additionalUser, roleOwner)
+	errUserRole := users.AddClusterRoleToUser(rb.standardUserClient, rb.cluster, rb.additionalUser, roleOwner, nil)
 	require.NoError(rb.T(), errUserRole)
 	additionalUserClient, err := rb.additionalUserClient.ReLogin()
 	require.NoError(rb.T(), err)
@@ -97,7 +99,7 @@ func (rb *RBACAdditionalTestSuite) ValidateAddMemberAsClusterRoles() {
 func (rb *RBACAdditionalTestSuite) ValidateAddCMAsProjectOwner() {
 
 	log.Info("Validating if cluster manage member should be able to add as a project member")
-	errUserRole := users.AddClusterRoleToUser(rb.standardUserClient, rb.cluster, rb.additionalUser, roleMember)
+	errUserRole := users.AddClusterRoleToUser(rb.standardUserClient, rb.cluster, rb.additionalUser, roleMember, nil)
 	require.NoError(rb.T(), errUserRole)
 	additionalUserClient, err := rb.additionalUserClient.ReLogin()
 	require.NoError(rb.T(), err)
@@ -107,7 +109,7 @@ func (rb *RBACAdditionalTestSuite) ValidateAddCMAsProjectOwner() {
 	require.NoError(rb.T(), err)
 	assert.Equal(rb.T(), 1, len(clusterList.Data))
 
-	err = users.AddProjectMember(rb.standardUserClient, rb.standardUserCOProject, rb.additionalUser, roleProjectOwner)
+	err = users.AddProjectMember(rb.standardUserClient, rb.standardUserCOProject, rb.additionalUser, roleProjectOwner, nil)
 	require.NoError(rb.T(), err)
 	userGetProject, err := projects.GetProjectList(rb.additionalUserClient, rb.cluster.ID)
 	require.NoError(rb.T(), err)
@@ -121,17 +123,17 @@ func (rb *RBACAdditionalTestSuite) ValidateAddPOsAsProjectOwner() {
 	rb.standardUserCOProject = createProjectAsCO
 
 	log.Info("Validating if Project Owner can add another Project Owner")
-	errUserRole := users.AddProjectMember(rb.standardUserClient, rb.standardUserCOProject, rb.additionalUser, roleProjectOwner)
+	errUserRole := users.AddProjectMember(rb.standardUserClient, rb.standardUserCOProject, rb.additionalUser, roleProjectOwner, nil)
 	require.NoError(rb.T(), errUserRole)
 	rb.additionalUserClient, err = rb.additionalUserClient.ReLogin()
 	require.NoError(rb.T(), err)
 
-	addNewUserAsPO, err := createUser(rb.client, standardUser)
+	addNewUserAsPO, err := users.CreateUserWithRole(rb.client, users.UserConfig(), standardUser)
 	require.NoError(rb.T(), err)
 	addNewUserAsPOClient, err := rb.client.AsUser(addNewUserAsPO)
 	require.NoError(rb.T(), err)
 
-	errUserRole2 := users.AddProjectMember(rb.additionalUserClient, rb.standardUserCOProject, addNewUserAsPO, roleProjectOwner)
+	errUserRole2 := users.AddProjectMember(rb.additionalUserClient, rb.standardUserCOProject, addNewUserAsPO, roleProjectOwner, nil)
 	require.NoError(rb.T(), errUserRole2)
 
 	addNewUserAsPOClient, err = addNewUserAsPOClient.ReLogin()
@@ -157,17 +159,17 @@ func (rb *RBACAdditionalTestSuite) ValidateCannotAddMPMsAsProjectOwner() {
 	rb.standardUserCOProject = createProjectAsCO
 
 	log.Info("Validating if Manage Project Member cannot add Project Owner")
-	errUserRole := users.AddProjectMember(rb.standardUserClient, rb.standardUserCOProject, rb.additionalUser, roleCustomManageProjectMember)
+	errUserRole := users.AddProjectMember(rb.standardUserClient, rb.standardUserCOProject, rb.additionalUser, roleCustomManageProjectMember, nil)
 	require.NoError(rb.T(), errUserRole)
 	rb.additionalUserClient, err = rb.additionalUserClient.ReLogin()
 	require.NoError(rb.T(), err)
 
-	addNewUserAsPO, err := createUser(rb.client, standardUser)
+	addNewUserAsPO, err := users.CreateUserWithRole(rb.client, users.UserConfig(), standardUser)
 	require.NoError(rb.T(), err)
 	addNewUserAsPOClient, err := rb.client.AsUser(addNewUserAsPO)
 	require.NoError(rb.T(), err)
 
-	errUserRole2 := users.AddProjectMember(rb.additionalUserClient, rb.standardUserCOProject, addNewUserAsPO, roleProjectOwner)
+	errUserRole2 := users.AddProjectMember(rb.additionalUserClient, rb.standardUserCOProject, addNewUserAsPO, roleProjectOwner, nil)
 	require.Error(rb.T(), errUserRole2)
 	errStatus := strings.Split(errUserRole2.Error(), ".")[1]
 	rgx := regexp.MustCompile(`\[(.*?)\]`)
@@ -209,13 +211,13 @@ func (rb *RBACAdditionalTestSuite) TestRBACAdditional() {
 		name   string
 		member string
 	}{
-		{"Standard User", standardUser},
-		{"Restricted Admin", restrictedAdmin},
+		{"Standard User RBAC Additional", standardUser},
+		{"Restricted Admin RBAC Additional", restrictedAdmin},
 	}
 
 	for _, tt := range tests {
 		rb.Run("Set up User with cluster Role for additional rbac test cases "+roleOwner, func() {
-			newUser, err := createUser(rb.client, tt.member)
+			newUser, err := users.CreateUserWithRole(rb.client, users.UserConfig(), tt.member)
 			require.NoError(rb.T(), err)
 			rb.standardUser = newUser
 			rb.T().Logf("Created user: %v", rb.standardUser.Username)
@@ -226,13 +228,13 @@ func (rb *RBACAdditionalTestSuite) TestRBACAdditional() {
 		if tt.member == standardUser {
 			rb.T().Logf("Adding user as " + roleOwner + " to the downstream cluster.")
 			//Adding created user to the downstream clusters with the role cluster Owner.
-			err := users.AddClusterRoleToUser(rb.client, rb.cluster, rb.standardUser, roleOwner)
+			err := users.AddClusterRoleToUser(rb.client, rb.cluster, rb.standardUser, roleOwner, nil)
 			require.NoError(rb.T(), err)
 			rb.standardUserClient, err = rb.standardUserClient.ReLogin()
 			require.NoError(rb.T(), err)
 
 			//Setting up an additional user for the additional rbac cases
-			additionalUser, err := createUser(rb.client, standardUser)
+			additionalUser, err := users.CreateUserWithRole(rb.client, users.UserConfig(), standardUser)
 			require.NoError(rb.T(), err)
 			rb.additionalUser = additionalUser
 			rb.additionalUserClient, err = rb.client.AsUser(rb.additionalUser)
@@ -259,10 +261,27 @@ func (rb *RBACAdditionalTestSuite) TestRBACAdditional() {
 			})
 
 		} else {
+			// There's some logic in here that is only known to the user who wrote this test.
+			// Why is it special cased for restrictedAdmin? Do we have it documented that you must provide a config
+			// if testing restrictedAdmin?
 			rb.Run("Validating if "+restrictedAdmin+" can create an RKE1 cluster", func() {
-				clusterConfig := getClusterConfig()
-				rke1.TestProvisioningRKE1CustomCluster(rb.T(), rb.standardUserClient, clusterConfig.externalNodeProvider,
-					clusterConfig.nodesAndRoles, "", clusterConfig.kubernetesVersion, clusterConfig.cni, clusterConfig.advancedOptions)
+				userConfig := new(provisioninginput.Config)
+				config.LoadConfig(provisioninginput.ConfigurationFileKey, userConfig)
+				nodeProviders := userConfig.NodeProviders[0]
+				nodeAndRoles := []provisioninginput.NodePools{
+					provisioninginput.AllRolesNodePool,
+				}
+				externalNodeProvider := provisioning.ExternalNodeProviderSetup(nodeProviders)
+				clusterConfig := clusters.ConvertConfigToClusterConfig(userConfig)
+				clusterConfig.NodePools = nodeAndRoles
+				kubernetesVersion, err := kubernetesversions.Default(rb.client, clusters.RKE1ClusterType.String(), []string{})
+				require.NoError(rb.T(), err)
+
+				clusterConfig.KubernetesVersion = kubernetesVersion[0]
+				clusterConfig.CNI = userConfig.CNIs[0]
+				clusterObject, _, err := provisioning.CreateProvisioningRKE1CustomCluster(rb.client, &externalNodeProvider, clusterConfig)
+				require.NoError(rb.T(), err)
+				provisioning.VerifyRKE1Cluster(rb.T(), rb.client, clusterConfig, clusterObject)
 			})
 
 			rb.Run("Validating if "+restrictedAdmin+" can list global settings", func() {

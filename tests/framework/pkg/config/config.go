@@ -1,10 +1,12 @@
 package config
 
 import (
+	"errors"
+	"fmt"
 	"os"
 
 	"github.com/creasty/defaults"
-	"gopkg.in/yaml.v2"
+	"sigs.k8s.io/yaml"
 )
 
 // LoadConfig reads the file defined by  the `CATTLE_TEST_CONFIG` environment variable and loads the object found at the given key onto the given configuration reference.
@@ -93,18 +95,24 @@ func LoadAndUpdateConfig(key string, config any, updateFunc func()) {
 }
 
 // WriteConfig writes a CATTLE_TEST_CONFIG config file when one is not previously written.
-func WriteConfig(key string, config interface{}) {
+func WriteConfig(key string, config interface{}) error {
 	configPath := os.Getenv("CATTLE_TEST_CONFIG")
+	if configPath == "" {
+		return errors.New("cannot write config because environment variable CATTLE_TEST_CONFIG is not set")
+	}
+
 	all := map[string]interface{}{}
 	all[key] = config
 
 	yamlConfig, err := yaml.Marshal(all)
 	if err != nil {
-		panic(err)
+		return fmt.Errorf("error marshalling config as YAML: %w", err)
 	}
 
 	err = os.WriteFile(configPath, yamlConfig, 0644)
 	if err != nil {
-		panic(err)
+		return fmt.Errorf("error writing config to file: %w", err)
 	}
+
+	return nil
 }

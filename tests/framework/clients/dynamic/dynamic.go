@@ -2,6 +2,7 @@ package dynamic
 
 import (
 	"context"
+	"fmt"
 
 	"k8s.io/client-go/rest"
 
@@ -23,7 +24,7 @@ type Client struct {
 
 // NewForConfig creates a new dynamic client or returns an error.
 func NewForConfig(ts *session.Session, inConfig *rest.Config) (dynamic.Interface, error) {
-	logrus.Infof("Dynamic Client Host:%s", inConfig.Host)
+	logrus.Debugf("Dynamic Client Host:%s", inConfig.Host)
 
 	dynamicClient, err := dynamic.NewForConfig(inConfig)
 	if err != nil {
@@ -71,6 +72,28 @@ type ResourceClient struct {
 	ts *session.Session
 }
 
+var (
+	// some GVKs are special and cannot be cleaned up because they do not exist
+	// after being created (eg: SelfSubjectAccessReview). We'll not register
+	// cleanup functions when creating objects of these kinds.
+	noCleanupGVKs = []schema.GroupVersionKind{
+		{
+			Group:   "authorization.k8s.io",
+			Version: "v1",
+			Kind:    "SelfSubjectAccessReview",
+		},
+	}
+)
+
+func needsCleanup(obj *unstructured.Unstructured) bool {
+	for _, gvk := range noCleanupGVKs {
+		if obj.GroupVersionKind() == gvk {
+			return false
+		}
+	}
+	return true
+}
+
 // Create is dynamic.ResourceInterface's Create function, that is being overwritten to register its delete function to the session.Session
 // that is being reference.
 func (c *ResourceClient) Create(ctx context.Context, obj *unstructured.Unstructured, opts metav1.CreateOptions, subresources ...string) (*unstructured.Unstructured, error) {
@@ -79,14 +102,22 @@ func (c *ResourceClient) Create(ctx context.Context, obj *unstructured.Unstructu
 		return nil, err
 	}
 
-	c.ts.RegisterCleanupFunc(func() error {
-		err := c.Delete(context.TODO(), unstructuredObj.GetName(), metav1.DeleteOptions{}, subresources...)
-		if errors.IsNotFound(err) {
-			return nil
-		}
+	if needsCleanup(obj) {
+		c.ts.RegisterCleanupFunc(func() error {
+			err := c.Delete(context.TODO(), unstructuredObj.GetName(), metav1.DeleteOptions{}, subresources...)
+			if errors.IsNotFound(err) {
+				return nil
+			}
 
-		return err
-	})
+			name := unstructuredObj.GetName()
+			if unstructuredObj.GetNamespace() != "" {
+				name = unstructuredObj.GetNamespace() + "/" + name
+			}
+			gvk := unstructuredObj.GetObjectKind().GroupVersionKind()
+
+			return fmt.Errorf("unable to delete (%v) %v: %w", gvk, name, err)
+		})
+	}
 
 	return unstructuredObj, err
 }

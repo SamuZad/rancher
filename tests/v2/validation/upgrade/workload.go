@@ -119,7 +119,7 @@ func newServiceTemplate(serviceName, namespaceName string, selector map[string]s
 // newTestContainerMinimal is a private constructor that returns container for minimal workload creations
 func newTestContainerMinimal() corev1.Container {
 	pullPolicy := corev1.PullAlways
-	return workloads.NewContainer(containerName, containerImage, pullPolicy, nil, nil)
+	return workloads.NewContainer(containerName, containerImage, pullPolicy, nil, nil, nil, nil, nil)
 }
 
 // newPodTemplateWithTestContainer is a private constructor that returns pod template spec for workload creations
@@ -158,7 +158,7 @@ func newPodTemplateWithSecretEnvironmentVariable(secretName string) corev1.PodTe
 			},
 		},
 	}
-	container := workloads.NewContainer(containerName, containerImage, pullPolicy, nil, envFrom)
+	container := workloads.NewContainer(containerName, containerImage, pullPolicy, nil, envFrom, nil, nil, nil)
 	containers := []corev1.Container{container}
 
 	return workloads.NewPodTemplate(containers, nil, nil, nil)
@@ -167,7 +167,7 @@ func newPodTemplateWithSecretEnvironmentVariable(secretName string) corev1.PodTe
 // waitUntilIngressIsAccessible waits until the ingress is accessible
 func waitUntilIngressIsAccessible(client *rancher.Client, hostname string) (bool, error) {
 	err := kubewait.Poll(500*time.Millisecond, 2*time.Minute, func() (done bool, err error) {
-		isIngressAccessible, err := ingresses.AccessIngressExternally(client, hostname, false)
+		isIngressAccessible, err := ingresses.IsIngressExternallyAccessible(client, hostname, "", false)
 		if err != nil {
 			return false, err
 		}

@@ -24,16 +24,18 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/hashicorp/go-multierror"
 	"github.com/mattn/go-colorable"
+	"github.com/rancher/remotedialer"
+	"github.com/rancher/wrangler/pkg/signals"
+	"github.com/sirupsen/logrus"
+
 	"github.com/rancher/rancher/pkg/agent/clean"
+	"github.com/rancher/rancher/pkg/agent/clean/adunmigration"
 	"github.com/rancher/rancher/pkg/agent/cluster"
 	"github.com/rancher/rancher/pkg/agent/node"
 	"github.com/rancher/rancher/pkg/agent/rancher"
 	"github.com/rancher/rancher/pkg/features"
 	"github.com/rancher/rancher/pkg/logserver"
 	"github.com/rancher/rancher/pkg/rkenodeconfigclient"
-	"github.com/rancher/remotedialer"
-	"github.com/rancher/wrangler/pkg/signals"
-	"github.com/sirupsen/logrus"
 )
 
 var (
@@ -55,11 +57,9 @@ func main() {
 			logrus.Warnf("failed to reconcile kubelet, error: %v", err)
 		}
 
-		logrus.SetOutput(colorable.NewColorableStdout())
+		configureLogrus()
+
 		logserver.StartServerWithDefaults()
-		if os.Getenv("CATTLE_DEBUG") == "true" || os.Getenv("RANCHER_DEBUG") == "true" {
-			logrus.SetLevel(logrus.DebugLevel)
-		}
 
 		initFeatures()
 
@@ -80,6 +80,10 @@ func main() {
 				bindingErr = multierror.Append(bindingErr, err)
 			}
 			err = bindingErr
+		} else if os.Getenv("AD_GUID_CLEANUP") == "true" {
+			dryrun := os.Getenv("DRY_RUN") == "true"
+			deleteMissingUsers := os.Getenv("AD_DELETE_MISSING_GUID_USERS") == "true"
+			err = adunmigration.UnmigrateAdGUIDUsers(nil, dryrun, deleteMissingUsers)
 		} else {
 			err = run(ctx)
 		}
@@ -484,4 +488,14 @@ func reconcileKubelet(ctx context.Context) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+func configureLogrus() {
+	logrus.SetOutput(colorable.NewColorableStdout())
+
+	if os.Getenv("CATTLE_TRACE") == "true" || os.Getenv("RANCHER_TRACE") == "true" {
+		logrus.SetLevel(logrus.TraceLevel)
+	} else if os.Getenv("CATTLE_DEBUG") == "true" || os.Getenv("RANCHER_DEBUG") == "true" {
+		logrus.SetLevel(logrus.DebugLevel)
+	}
 }

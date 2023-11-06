@@ -3,11 +3,12 @@ package v1
 import (
 	rkev1 "github.com/rancher/rancher/pkg/apis/rke.cattle.io/v1"
 	"github.com/rancher/wrangler/pkg/genericcondition"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // +genclient
+// +kubebuilder:skipversion
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 type Cluster struct {
@@ -45,6 +46,7 @@ type AgentDeploymentCustomization struct {
 type ClusterStatus struct {
 	Ready              bool                                `json:"ready,omitempty"`
 	ClusterName        string                              `json:"clusterName,omitempty"`
+	FleetWorkspaceName string                              `json:"fleetWorkspaceName,omitempty"`
 	ClientSecretName   string                              `json:"clientSecretName,omitempty"`
 	AgentDeployed      bool                                `json:"agentDeployed,omitempty"`
 	ObservedGeneration int64                               `json:"observedGeneration"`

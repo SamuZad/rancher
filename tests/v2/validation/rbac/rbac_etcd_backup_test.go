@@ -1,3 +1,5 @@
+//go:build (validation || infra.any || cluster.any || stress) && !sanity && !extended
+
 package rbac
 
 import (
@@ -53,7 +55,8 @@ func (rb *ETCDRbacBackupTestSuite) SetupSuite() {
 func (rb *ETCDRbacBackupTestSuite) ValidateEtcdSnapshotCluster(role string) {
 
 	log.Infof("Creating a snapshot of the cluster as %v", role)
-	err := etcdsnapshot.CreateSnapshot(rb.standardUserClient, rb.clusterName, rb.namespace)
+
+	err := etcdsnapshot.CreateSnapshot(rb.standardUserClient, rb.clusterName)
 	switch role {
 	case roleOwner, restrictedAdmin:
 		require.NoError(rb.T(), err)
@@ -64,7 +67,7 @@ func (rb *ETCDRbacBackupTestSuite) ValidateEtcdSnapshotCluster(role string) {
 	}
 }
 
-func (rb *ETCDRbacBackupTestSuite) TestETCDRbac() {
+func (rb *ETCDRbacBackupTestSuite) TestETCDRBAC() {
 	clusterID, err := clusters.GetClusterIDByName(rb.client, rb.clusterName)
 	require.NoError(rb.T(), err)
 	if !(strings.Contains(clusterID, "c-m-")) {
@@ -83,7 +86,7 @@ func (rb *ETCDRbacBackupTestSuite) TestETCDRbac() {
 	}
 	for _, tt := range tests {
 		rb.Run("Set up User with Cluster Role "+tt.name, func() {
-			newUser, err := createUser(rb.client, tt.member)
+			newUser, err := users.CreateUserWithRole(rb.client, users.UserConfig(), tt.member)
 			require.NoError(rb.T(), err)
 			rb.standardUser = newUser
 			rb.T().Logf("Created user: %v", rb.standardUser.Username)
@@ -102,10 +105,10 @@ func (rb *ETCDRbacBackupTestSuite) TestETCDRbac() {
 
 			if tt.member == standardUser {
 				if strings.Contains(tt.role, "project") {
-					err := users.AddProjectMember(rb.client, rb.adminProject, rb.standardUser, tt.role)
+					err := users.AddProjectMember(rb.client, rb.adminProject, rb.standardUser, tt.role, nil)
 					require.NoError(rb.T(), err)
 				} else {
-					err := users.AddClusterRoleToUser(rb.client, rb.cluster, rb.standardUser, tt.role)
+					err := users.AddClusterRoleToUser(rb.client, rb.cluster, rb.standardUser, tt.role, nil)
 					require.NoError(rb.T(), err)
 				}
 			}
@@ -124,6 +127,6 @@ func (rb *ETCDRbacBackupTestSuite) TestETCDRbac() {
 	}
 }
 
-func TestETCDRbacBackupTestSuite(t *testing.T) {
+func TestETCDRBACBackupTestSuite(t *testing.T) {
 	suite.Run(t, new(ETCDRbacBackupTestSuite))
 }
